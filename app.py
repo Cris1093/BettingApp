@@ -351,10 +351,18 @@ def salva_partite(records):
 
 
 def aggiorna_partite(records):
+    """Aggiorna partite ESISTENTI per id (UPDATE reale, non upsert: tocca solo le
+    colonne indicate, senza rischiare inserimenti di righe vuote)."""
     cli = get_client()
     if not cli:
         raise RuntimeError("Supabase non configurato.")
-    cli.table("partite").upsert(records).execute()  # upsert per id (pk)
+    for rec in records:
+        rid = rec.get("id")
+        if not rid:
+            continue
+        payload = {k: v for k, v in rec.items() if k != "id"}
+        if payload:
+            cli.table("partite").update(payload).eq("id", rid).execute()
     st.cache_data.clear()
 
 
