@@ -484,6 +484,16 @@ def salva_pronostico(record):
     if not cli:
         raise RuntimeError("Supabase non configurato.")
     cli.table("pronostici").insert(record).execute()
+    st.cache_data.clear()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def carica_pronostici():
+    cli = get_client()
+    if not cli:
+        return pd.DataFrame()
+    res = cli.table("pronostici").select("*").order("creato_il", desc=True).execute()
+    return pd.DataFrame(res.data or [])
 
 
 def completa_risultati_pronostici():
@@ -1912,6 +1922,77 @@ def _col_conf(v):  # v in 0..100
     return COL["win"] if v >= 65 else (COL["draw"] if v >= 45 else COL["loss"])
 
 
+def _ultime_partite_testo(df, team, n=15):
+    """Righe di testo con le ultime partite giocate di una squadra."""
+    if df.empty:
+        return []
+    d = df[((df["squadra_casa"] == team) | (df["squadra_trasferta"] == team))]
+    d = d[d["gol_casa"].notna() & d["gol_trasferta"].notna()]
+    if "data" in d.columns:
+        d = d.sort_values("data", ascending=False)
+    out = []
+    for _, m in d.head(n).iterrows():
+        data = m["data"]
+        try:
+            data = pd.to_datetime(str(data)).strftime("%d.%m.%y")
+        except Exception:
+            pass
+        gc, gt = int(m["gol_casa"]), int(m["gol_trasferta"])
+        comp = _txt(m.get("competizione"))
+        comp = f"[{comp}] " if comp else ""
+        out.append(f"{data} {comp}{m['squadra_casa']} {gc}-{gt} {m['squadra_trasferta']}")
+    return out
+
+
+def riepilogo_testo(a, df, home, away, odds, row=None):
+    """Blocco di testo (da copiare) con pronostico + quote + ultime partite."""
+    p = a["prob"]
+    L = []
+    data = ""
+    if row is not None and "data" in row:
+        try:
+            data = pd.to_datetime(str(row["data"])).strftime("%d.%m.%Y")
+        except Exception:
+            data = str(row.get("data") or "")
+    L.append(f"{home.upper()} - {away.upper()}" + (f"  ({data})" if data else ""))
+    comp = _txt(row.get("competizione")) if row is not None else ""
+    if comp:
+        L.append(f"Competizione: {comp}")
+    L.append("")
+    L.append(f"PRONOSTICO: {a['best']['mercato']}  (confidence {a['best']['confidence']:.0f}/100)")
+    if a["best"].get("alert"):
+        L.append(f"  ⚠️ alert quota {a['best']['alert']} — stat {a['best']['prob']*100:.0f}% "
+                 f"vs quota {a['best']['market_prob']*100:.0f}%")
+    L.append(f"1: {p['1']*100:.0f}%   X: {p['X']*100:.0f}%   2: {p['2']*100:.0f}%")
+    L.append(f"Over 2.5: {a['over_prob']*100:.0f}%   Goal: {a['btts_prob']*100:.0f}%")
+    L.append(f"Gol attesi: {home} {p['lambda_home']:.2f} - {away} {p['lambda_away']:.2f}")
+    rpe = a.get("risultati_per_esito", {})
+    if a.get("prob", {}).get("risultati"):
+        top = ", ".join(f"{r['risultato']} ({r['p']*100:.0f}%)" for r in p["risultati"][:4])
+        L.append(f"Risultati probabili: {top}")
+    if odds:
+        qs = []
+        for k, et in [("1", "1"), ("X", "X"), ("2", "2"), ("over25", "Over"),
+                      ("under25", "Under"), ("goal", "Goal"), ("nogoal", "NoGoal")]:
+            if odds.get(k):
+                qs.append(f"{et} {odds[k]}")
+        if qs:
+            L.append("Quote: " + " / ".join(qs))
+    if a.get("alerts"):
+        L.append("")
+        L.append("ALERT QUOTA:")
+        for al in a["alerts"]:
+            L.append(f"  - {al['mercato']}: {al['livello']} (stat {al['prob']*100:.0f}% "
+                     f"vs quota {al['market_prob']*100:.0f}%)")
+    for team in (home, away):
+        righe = _ultime_partite_testo(df, team)
+        if righe:
+            L.append("")
+            L.append(f"ULTIME PARTITE {team.upper()}:")
+            L.extend(righe)
+    return "\n".join(L)
+
+
 def pagina_analisi(user):
     st.header("🔮 Analisi & Pronostico")
     st.caption("Motore multi-fattore: forma pesata (5/10/15 + recency), split casa/trasferta, "
@@ -2160,9 +2241,17 @@ def pagina_analisi(user):
                     "prob_over25": float(a["over_prob"]), "prob_goal": float(a["btts_prob"]),
                     "prob_1": float(p["1"]), "prob_x": float(p["X"]), "prob_2": float(p["2"]),
                 })
-                st.success("Pronostico salvato. Servirà a calibrare il modello nel tempo.")
+                st.success("Pronostico salvato. Lo trovi in 📈 Storico pronostici.")
             except Exception as e:
                 st.error(f"Errore: {e}")
+
+    # --- riepilogo da copiare (per studio / note) ---
+    with st.expander("📋 Riepilogo da copiare (note)"):
+        st.caption("Blocco di testo con pronostico, quote e ultime partite: "
+                   "usa l'icona 📋 in alto a destra del riquadro per copiarlo tutto.")
+        testo = riepilogo_testo(a, df, home, away, odds,
+                                row=row if not pend.empty else None)
+        st.code(testo, language=None)
 
     # --- CALIBRAZIONE ---
     st.divider()
@@ -2281,6 +2370,69 @@ def pagina_analisi(user):
 # =============================================================================
 #  MAIN
 # =============================================================================
+def pagina_storico_pronostici(user):
+    st.header("📈 Storico pronostici")
+    st.caption("I pronostici salvati prima della partita, confrontati col risultato reale. "
+               "Solo le partite per cui hai salvato il pronostico dall'Analisi.")
+
+    if not supabase_pronto():
+        st.warning("Supabase non configurato.")
+        return
+
+    cc = st.columns(2)
+    if cc[0].button("🔄 Ricarica"):
+        st.cache_data.clear()
+    if cc[1].button("✅ Aggiorna risultati"):
+        n = completa_risultati_pronostici()
+        st.success(f"Risultati abbinati a {n} pronostici." if n else "Nessun nuovo risultato.")
+
+    pron = carica_pronostici()
+    if pron.empty:
+        st.info("Nessun pronostico salvato. Vai in 🔮 Analisi & Pronostico e usa "
+                "'💾 Salva questo pronostico'.")
+        return
+
+    righe = []
+    vinti = persi = aperti = 0
+    for _, r in pron.iterrows():
+        gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
+        esito = ""
+        if gc is not None and gt is not None and not (pd.isna(gc) or pd.isna(gt)):
+            ris = f"{int(gc)}-{int(gt)}"
+            won = _pronostico_vinto(r.get("mercato") or "", gc, gt)
+            if won is True:
+                esito, _t = "✅ vinto", vinti
+                vinti += 1
+            elif won is False:
+                esito = "❌ perso"
+                persi += 1
+            else:
+                esito = "—"
+        else:
+            ris = "in attesa"
+            aperti += 1
+        righe.append({
+            "Data": r.get("data"), "Casa": r.get("squadra_casa"),
+            "Trasferta": r.get("squadra_trasferta"), "Pronostico": r.get("mercato"),
+            "Conf.": None if pd.isna(r.get("confidence")) else int(r.get("confidence")),
+            "Stat %": None if pd.isna(r.get("prob")) else round(float(r.get("prob")) * 100),
+            "Quota": r.get("quota"), "Risultato": ris, "Esito": esito,
+        })
+
+    giocati = vinti + persi
+    if giocati:
+        c = st.columns(3)
+        c[0].metric("Pronostici giocati", giocati)
+        c[1].metric("Vinti", vinti)
+        c[2].metric("Percentuale", f"{vinti/giocati*100:.0f}%")
+    if aperti:
+        st.caption(f"{aperti} in attesa di risultato.")
+
+    st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
+    st.caption("Nota: la percentuale di riuscita è indicativa finché i numeri sono piccoli. "
+               "Serve tempo e volume per trarne conclusioni.")
+
+
 def main():
     user = login_gate()
 
@@ -2288,6 +2440,7 @@ def main():
         st.markdown(f"**Utente:** {user['username']}  \n_ruolo: {user['ruolo']}_")
         pagina = st.radio("Menu", ["📥 Ultimi risultati e quote", "📊 Estrattore risultati",
                                    "🗓️ Estrattore pianificazione", "🔮 Analisi & Pronostico",
+                                   "📈 Storico pronostici",
                                    "🗄️ Database", "⚙️ Configurazione"])
         if st.button("Esci"):
             st.session_state.pop("user", None)
@@ -2301,6 +2454,8 @@ def main():
         pagina_estrattore_pianificazione(user)
     elif pagina.startswith("🔮"):
         pagina_analisi(user)
+    elif pagina.startswith("📈"):
+        pagina_storico_pronostici(user)
     elif pagina.startswith("🗄️"):
         pagina_database(user)
     else:
