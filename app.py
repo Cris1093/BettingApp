@@ -23,6 +23,7 @@ import analisi
 
 import pandas as pd
 import streamlit as st
+from streamlit.components.v1 import html as components_html
 
 # --- Supabase / bcrypt sono opzionali all'avvio, così l'app parte anche senza secrets ---
 try:
@@ -586,24 +587,29 @@ def _pronostico_vinto(mercato, gc, gt):
     return None
 
 
+def _txt(v):
+    """Converte in stringa pulita gestendo None e NaN (mai crash su .strip())."""
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(v).strip()
+
+
 def label_competizione(nome_lungo, nazione):
     """Etichetta leggibile: 'Nome | NAZIONE'."""
-    nl = (nome_lungo or "").strip()
-    na = (nazione or "").strip()
+    nl = _txt(nome_lungo)
+    na = _txt(nazione)
     if nl and na:
         return f"{nl} | {na}"
     return nl or na or ""
 
 
 def _key(s):
-    if s is None:
-        return ""
-    try:
-        if pd.isna(s):
-            return ""
-    except (TypeError, ValueError):
-        pass
-    return re.sub(r"\s+", " ", str(s)).strip().casefold()
+    return re.sub(r"\s+", " ", _txt(s)).casefold()
 
 
 def categoria_di(codice_o_label, comp_df):
@@ -635,7 +641,7 @@ def categoria_o_nd(codice_o_label, comp_df):
 # =============================================================================
 def _norm_squadra(s):
     """Toglie il codice paese '(Kaz)' e normalizza per il confronto."""
-    s = re.sub(r"\(.*?\)", "", s or "")
+    s = re.sub(r"\(.*?\)", "", _txt(s))
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -753,6 +759,19 @@ def crea_utente(username, password, ruolo="user"):
     st.cache_data.clear()
 
 
+def _autofill_hint(coppie):
+    """Marca i campi (per aria-label) con l'attributo autocomplete giusto, così il
+    gestore password di iPhone/Android riempie username e password nei punti corretti."""
+    js = (
+        "const doc=window.parent.document;"
+        "function s(){let ok=true;const m=" + json.dumps(coppie) + ";"
+        "m.forEach(function(p){var e=doc.querySelector('input[aria-label=\"'+p[0]+'\"]');"
+        "if(e){e.setAttribute('autocomplete',p[1]);}else{ok=false;}});return ok;}"
+        "let n=0;const iv=setInterval(function(){if(s()||n++>25)clearInterval(iv);},150);"
+    )
+    components_html("<script>" + js + "</script>", height=0)
+
+
 def login_gate():
     """Ritorna l'utente loggato oppure blocca l'app mostrando login/bootstrap."""
     if "user" in st.session_state:
@@ -786,6 +805,8 @@ def login_gate():
                     crea_utente(u, p1, ruolo="admin")
                     st.success("Admin creato! Ora effettua il login.")
                     st.rerun()
+        _autofill_hint([["Username", "username"], ["Password", "new-password"],
+                        ["Ripeti password", "new-password"]])
         st.stop()
 
     # Login normale
@@ -800,6 +821,7 @@ def login_gate():
                 st.rerun()
             else:
                 st.error("Credenziali non valide.")
+    _autofill_hint([["Username", "username"], ["Password", "current-password"]])
     st.stop()
 
 
@@ -1029,11 +1051,19 @@ def pagina_database(user):
 
     # filtro rapido
     q = st.text_input("Cerca squadra")
-    vis = df
+    cc = st.columns([1, 1])
+    solo_seguite = cc[0].checkbox(
+        "Mostra solo le partite che seguo", value=True,
+        help="Le fixture per cui hai incollato ultimi risultati + quote. "
+             "Disattiva per vedere anche lo storico usato dal motore.")
+    base = df
+    if solo_seguite and "is_target" in df.columns:
+        base = df[df["is_target"] == True]
+    vis = base
     if q:
-        m = df["squadra_casa"].str.contains(q, case=False, na=False) | \
-            df["squadra_trasferta"].str.contains(q, case=False, na=False)
-        vis = df[m]
+        m = base["squadra_casa"].str.contains(q, case=False, na=False) | \
+            base["squadra_trasferta"].str.contains(q, case=False, na=False)
+        vis = base[m]
 
     st.caption(f"{len(vis)} partite (dalla più recente).")
 
@@ -1045,7 +1075,8 @@ def pagina_database(user):
         "Trasferta": vis["squadra_trasferta"],
         "Gol Casa": vis["gol_casa"].astype("Int64"),
         "Gol Trasferta": vis["gol_trasferta"].astype("Int64"),
-    })
+    }).reset_index(drop=True)
+    orig = vista.copy()   # per confrontare cosa è cambiato
 
     edit = st.data_editor(
         vista, use_container_width=True, hide_index=True, key="editor_db",
@@ -1060,20 +1091,25 @@ def pagina_database(user):
 
     col1, col2 = st.columns(2)
     if col1.button("💾 Salva modifiche risultati", type="primary"):
+        def _val(x):
+            return None if pd.isna(x) else int(x)
         records = []
-        for _, r in edit.iterrows():
-            gc = None if pd.isna(r["Gol Casa"]) else int(r["Gol Casa"])
-            gt = None if pd.isna(r["Gol Trasferta"]) else int(r["Gol Trasferta"])
-            rec = {
-                "id": r["id"], "gol_casa": gc, "gol_trasferta": gt,
-                "aggiornato_il": datetime.utcnow().isoformat(),
-            }
+        for i in range(len(edit)):
+            gc, gt = _val(edit.iloc[i]["Gol Casa"]), _val(edit.iloc[i]["Gol Trasferta"])
+            gc0, gt0 = _val(orig.iloc[i]["Gol Casa"]), _val(orig.iloc[i]["Gol Trasferta"])
+            if gc == gc0 and gt == gt0:
+                continue   # riga non modificata: non la tocco (salvataggio istantaneo)
+            rec = {"id": edit.iloc[i]["id"], "gol_casa": gc, "gol_trasferta": gt,
+                   "aggiornato_il": datetime.utcnow().isoformat()}
             if gc is not None and gt is not None:
-                rec["da_compilare"] = False   # ha un risultato: esce dai "da compilare"
+                rec["da_compilare"] = False
             records.append(rec)
         try:
-            aggiorna_partite(records)
-            st.success("Risultati aggiornati.")
+            if records:
+                aggiorna_partite(records)
+                st.success(f"Aggiornate {len(records)} partite.")
+            else:
+                st.info("Nessuna modifica da salvare.")
         except Exception as e:
             st.error(f"Errore: {e}")
 
