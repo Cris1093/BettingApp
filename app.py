@@ -577,7 +577,14 @@ def label_competizione(nome_lungo, nazione):
 
 
 def _key(s):
-    return re.sub(r"\s+", " ", (s or "")).strip().casefold()
+    if s is None:
+        return ""
+    try:
+        if pd.isna(s):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return re.sub(r"\s+", " ", str(s)).strip().casefold()
 
 
 def categoria_di(codice_o_label, comp_df):
