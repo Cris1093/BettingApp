@@ -326,6 +326,7 @@ def partite_per_export(df):
 # =============================================================================
 #  DB PARTITE
 # =============================================================================
+@st.cache_data(ttl=600, show_spinner=False)
 def carica_partite():
     cli = get_client()
     if not cli:
@@ -345,6 +346,7 @@ def salva_partite(records):
     cli.table("partite").upsert(
         records, on_conflict="data,squadra_casa,squadra_trasferta"
     ).execute()
+    st.cache_data.clear()
 
 
 def aggiorna_partite(records):
@@ -352,6 +354,7 @@ def aggiorna_partite(records):
     if not cli:
         raise RuntimeError("Supabase non configurato.")
     cli.table("partite").upsert(records).execute()  # upsert per id (pk)
+    st.cache_data.clear()
 
 
 # =============================================================================
@@ -361,6 +364,7 @@ CATEGORIE = ["Non assegnata", "Campionato", "Playoff", "Coppa nazionale",
              "Coppa internazionale", "Coppa/torneo secondario", "Amichevole", "Altro"]
 
 
+@st.cache_data(ttl=600, show_spinner=False)
 def carica_competizioni():
     cli = get_client()
     if not cli:
@@ -374,11 +378,13 @@ def upsert_competizioni(records):
     if not cli:
         raise RuntimeError("Supabase non configurato.")
     cli.table("competizioni").upsert(records).execute()
+    st.cache_data.clear()
 
 
 def elimina_competizione(cid):
     cli = get_client()
     cli.table("competizioni").delete().eq("id", cid).execute()
+    st.cache_data.clear()
 
 
 # --- Calibrazione & pronostici ---
@@ -716,6 +722,7 @@ def check_pw(pw, h):
         return False
 
 
+@st.cache_data(ttl=600, show_spinner=False)
 def carica_utenti():
     cli = get_client()
     if not cli:
@@ -730,6 +737,7 @@ def crea_utente(username, password, ruolo="user"):
         "password_hash": hash_pw(password),
         "ruolo": ruolo,
     }).execute()
+    st.cache_data.clear()
 
 
 def login_gate():
@@ -1291,6 +1299,33 @@ def pagina_estrattore_pianificazione(user):
     if not supabase_pronto():
         st.warning("Supabase non configurato.")
         return
+
+    # --- inserimento manuale rapido (una partita alla volta) ---
+    with st.expander("➕ Aggiungi una partita manualmente"):
+        cc = st.columns(2)
+        m_data = cc[0].date_input("Data", value=None, format="DD/MM/YYYY", key="man_data")
+        m_ora = cc[1].text_input("Ora (opzionale)", key="man_ora", placeholder="20:45")
+        cc = st.columns(2)
+        m_casa = cc[0].text_input("Squadra casa", key="man_casa")
+        m_trasf = cc[1].text_input("Squadra trasferta", key="man_trasf")
+        m_comp = st.text_input("Competizione (opzionale)", key="man_comp",
+                               placeholder="es. Serie A")
+        if st.button("Aggiungi partita", key="man_btn"):
+            if not m_data or not m_casa.strip() or not m_trasf.strip():
+                st.warning("Servono almeno data, squadra casa e squadra trasferta.")
+            else:
+                try:
+                    salva_partite([{
+                        "data": str(m_data), "ora": m_ora.strip() or None,
+                        "squadra_casa": m_casa.strip(), "squadra_trasferta": m_trasf.strip(),
+                        "competizione": m_comp.strip() or None,
+                        "tipo_partita": "ND", "da_compilare": True,
+                        "inserito_da": user["username"],
+                        "aggiornato_il": datetime.utcnow().isoformat(),
+                    }])
+                    st.success(f"Partita aggiunta: {m_casa.strip()} - {m_trasf.strip()}")
+                except Exception as e:
+                    st.error(f"Errore: {e}")
 
     data_batch = st.date_input(
         "Data delle partite (obbligatoria, vale per tutta la tranche)",
