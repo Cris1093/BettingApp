@@ -487,6 +487,29 @@ def salva_pronostico(record):
     st.cache_data.clear()
 
 
+def upsert_pronostico(record):
+    """Salva/aggiorna il pronostico pre-partita: uno solo per partita. Se la partita
+    ha già un risultato salvato, il pronostico è 'congelato' e non viene sovrascritto."""
+    cli = get_client()
+    if not cli:
+        return
+    pid = record.get("partita_id")
+    esistente = None
+    if pid:
+        try:
+            r = cli.table("pronostici").select("id,gol_casa").eq("partita_id", pid).execute()
+            esistente = (r.data or [None])[0]
+        except Exception:
+            esistente = None
+    if esistente:
+        if esistente.get("gol_casa") is not None:
+            return  # già completato col risultato: non tocco la foto pre-partita
+        cli.table("pronostici").update(record).eq("id", esistente["id"]).execute()
+    else:
+        cli.table("pronostici").insert(record).execute()
+    st.cache_data.clear()
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def carica_pronostici():
     cli = get_client()
@@ -1075,7 +1098,13 @@ def pagina_database(user):
             base["squadra_trasferta"].str.contains(q, case=False, na=False)
         vis = base[m]
 
-    st.caption(f"{len(vis)} partite (dalla più recente).")
+    st.caption(f"{len(vis)} partite (senza risultato in cima, poi dalla più recente).")
+
+    # ordina: prima le partite SENZA risultato (da aggiornare), poi le altre per data desc
+    vis = vis.copy()
+    vis["_senza_ris"] = vis["gol_casa"].isna() | vis["gol_trasferta"].isna()
+    ordina = ["_senza_ris"] + (["data"] if "data" in vis.columns else [])
+    vis = vis.sort_values(ordina, ascending=[False] + [False] * (len(ordina) - 1))
 
     vista = pd.DataFrame({
         "id": vis["id"],
@@ -2042,11 +2071,8 @@ def pagina_analisi(user):
         w_coppa = cc[1].slider("Coppe", 0.0, 1.0, 0.85, 0.05)
         w_sec = cc[2].slider("Torneo second.", 0.0, 1.0, 0.75, 0.05)
         w_ami = cc[3].slider("Amichevole", 0.0, 1.0, 0.35, 0.05)
-        st.caption("Quanto le quote influenzano la probabilità (non è value betting: "
-                   "il mercato è una fonte informativa in più, utile per neopromosse/contesti anomali):")
-        cc = st.columns(2)
-        blend_on = cc[0].checkbox("Usa il mercato", value=True)
-        peso_mkt = cc[1].slider("Peso mercato", 0.0, 0.6, 0.35, 0.05, disabled=not blend_on)
+        st.caption("Le quote NON mediano la probabilità: servono solo a segnalare le "
+                   "discrepanze (alert) e a modulare la confidence.")
     config = {
         "recency_decay": decay, "home_adv_goals": hadv, "over": {"h2h": h2h_w},
         "pesi_competizione": {
@@ -2054,7 +2080,7 @@ def pagina_analisi(user):
             "Coppa nazionale": w_coppa, "Coppa internazionale": w_coppa,
             "Coppa/torneo secondario": w_sec, "Altro": w_sec, "Amichevole": w_ami,
         },
-        "blending_mercato": blend_on, "peso_mercato": peso_mkt,
+        "blending_mercato": False, "peso_mercato": 0.0,
     }
 
     calibratori = carica_calibrazione()
@@ -2227,12 +2253,18 @@ def pagina_analisi(user):
             f'<div style="margin-top:7px;">{_barra(m["confidence"], _col_conf(m["confidence"]))}</div></div>')
     st.html(cards)
 
-    # --- salva pronostico (per la calibrazione futura) ---
-    if not pend.empty:
-        if st.button("💾 Salva questo pronostico"):
+    # --- riepilogo (una volta) usato sia per la copia sia per lo storico ---
+    testo = riepilogo_testo(a, df, home, away, odds,
+                            row=row if not pend.empty else None)
+
+    # --- salvataggio AUTOMATICO del pronostico (fixture pre-partita) ---
+    if not pend.empty and "id" in row:
+        sig = f'{row["id"]}|{best["mercato"]}|{best["confidence"]:.0f}'
+        salvati = st.session_state.setdefault("auto_pron", set())
+        if sig not in salvati:
             try:
-                salva_pronostico({
-                    "partita_id": str(row["id"]) if "id" in row else None,
+                upsert_pronostico({
+                    "partita_id": str(row["id"]),
                     "data": str(row["data"]) if "data" in row else None,
                     "squadra_casa": home, "squadra_trasferta": away,
                     "mercato": best["mercato"], "prob": float(best["prob"]),
@@ -2240,17 +2272,17 @@ def pagina_analisi(user):
                     "quota": float(best["quota"]) if best.get("quota") else None,
                     "prob_over25": float(a["over_prob"]), "prob_goal": float(a["btts_prob"]),
                     "prob_1": float(p["1"]), "prob_x": float(p["X"]), "prob_2": float(p["2"]),
+                    "riepilogo": testo,
                 })
-                st.success("Pronostico salvato. Lo trovi in 📈 Storico pronostici.")
-            except Exception as e:
-                st.error(f"Errore: {e}")
+                salvati.add(sig)
+            except Exception:
+                pass  # il salvataggio non deve mai bloccare l'analisi
+        st.caption("💾 Pronostico salvato automaticamente in 📈 Storico pronostici.")
 
     # --- riepilogo da copiare (per studio / note) ---
     with st.expander("📋 Riepilogo da copiare (note)"):
         st.caption("Blocco di testo con pronostico, quote e ultime partite: "
                    "usa l'icona 📋 in alto a destra del riquadro per copiarlo tutto.")
-        testo = riepilogo_testo(a, df, home, away, odds,
-                                row=row if not pend.empty else None)
         st.code(testo, language=None)
 
     # --- CALIBRAZIONE ---
@@ -2431,6 +2463,20 @@ def pagina_storico_pronostici(user):
     st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
     st.caption("Nota: la percentuale di riuscita è indicativa finché i numeri sono piccoli. "
                "Serve tempo e volume per trarne conclusioni.")
+
+    # --- riepilogo pre-partita salvato ---
+    if "riepilogo" in pron.columns:
+        st.subheader("📋 Riepilogo da copiare (note)")
+        opz = {}
+        for _, r in pron.iterrows():
+            if _txt(r.get("riepilogo")):
+                lab = f'{r.get("squadra_casa")} - {r.get("squadra_trasferta")} ({r.get("data")})'
+                opz[lab] = r["riepilogo"]
+        if opz:
+            scelta = st.selectbox("Scegli una partita", list(opz.keys()))
+            st.code(opz[scelta], language=None)
+        else:
+            st.caption("I riepiloghi compaiono qui per i pronostici generati d'ora in avanti.")
 
 
 def main():
