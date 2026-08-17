@@ -15,6 +15,7 @@ import html as _html
 import io
 import json
 import re
+import uuid
 from datetime import date, datetime
 from difflib import SequenceMatcher
 
@@ -377,6 +378,10 @@ def upsert_competizioni(records):
     cli = get_client()
     if not cli:
         raise RuntimeError("Supabase non configurato.")
+    # genera l'id lato app per le righe nuove (robusto anche se il DB non ha il default)
+    for rec in records:
+        if not rec.get("id"):
+            rec["id"] = str(uuid.uuid4())
     cli.table("competizioni").upsert(records).execute()
     st.cache_data.clear()
 
@@ -1762,7 +1767,8 @@ def pagina_configurazione(user):
             "Nazione": comp_df.get("nazione"),
             "Nome corto": comp_df.get("nome_corto"),
             "Categoria": comp_df.get("categoria").fillna("Non assegnata"),
-            "Livello": comp_df.get("livello") if "livello" in comp_df else None,
+            "Livello": ([None if pd.isna(x) else int(x) for x in comp_df["livello"]]
+                        if "livello" in comp_df else [None] * len(comp_df)),
         })
         edit = st.data_editor(
             vista, use_container_width=True, hide_index=True, num_rows="dynamic",
@@ -1770,9 +1776,10 @@ def pagina_configurazione(user):
             column_config={
                 "id": None,
                 "Categoria": st.column_config.SelectboxColumn(options=CATEGORIE),
-                "Livello": st.column_config.NumberColumn(
-                    help="Solo per i campionati: 1 = prima divisione, 2 = seconda, 3 = terza…",
-                    min_value=1, max_value=9, step=1),
+                "Livello": st.column_config.SelectboxColumn(
+                    help="Solo per i campionati: 1 = prima divisione, 2 = seconda, 3 = terza… "
+                         "Lascia vuoto per coppe e amichevoli.",
+                    options=[1, 2, 3, 4, 5, 6, 7, 8, 9]),
             },
         )
 
