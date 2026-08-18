@@ -1088,6 +1088,69 @@ def pagina_estrattore(user):
 # =============================================================================
 #  PAGINA: DATABASE
 # =============================================================================
+def _dettaglio_partita(df, row, comp_df):
+    """Mostra la scheda di una partita: analisi dal vivo se non ha risultato,
+    pronostico pre-partita salvato se è già finita (niente ricalcolo 'col senno di poi')."""
+    home, away = row["squadra_casa"], row["squadra_trasferta"]
+    finita = _num_ok(row.get("gol_casa")) and _num_ok(row.get("gol_trasferta"))
+    st.divider()
+    st.subheader(f"🔎 {home} - {away}")
+
+    if finita:
+        gc, gt = int(row["gol_casa"]), int(row["gol_trasferta"])
+        st.markdown(f"**Risultato finale: {gc} - {gt}**")
+        # recupera il pronostico pre-partita salvato (foto fatta al momento giusto)
+        pron = carica_pronostici()
+        rec = None
+        if not pron.empty and "partita_id" in pron:
+            m = pron[pron["partita_id"] == str(row["id"])]
+            if not m.empty:
+                rec = m.iloc[0]
+        if rec is None:
+            st.info("Per questa partita non è stato salvato un pronostico pre-partita, quindi "
+                    "non posso mostrarlo. Non lo ricalcolo a posteriori perché userebbe dati "
+                    "successivi alla partita (non sarebbe più una previsione).")
+            return
+        won = _pronostico_vinto(rec.get("mercato") or "", gc, gt)
+        esito = "✅ vinto" if won is True else ("❌ perso" if won is False else "—")
+        c = st.columns(3)
+        c[0].metric("Pronostico", _txt(rec.get("mercato")))
+        c[1].metric("Confidence", f'{int(rec.get("confidence"))}/100'
+                    if not pd.isna(rec.get("confidence")) else "—")
+        c[2].metric("Esito", esito)
+        txt = _txt(rec.get("riepilogo"))
+        if txt:
+            st.markdown("**📋 Riepilogo pre-partita (salvato):**")
+            st.code(txt, language=None)
+        else:
+            st.caption("Riepilogo non disponibile per questo pronostico.")
+        return
+
+    # partita non ancora giocata: analisi dal vivo (come in Analisi & Pronostico)
+    a, home, away, odds = _analizza_row(df, row, comp_df, calibratori=carica_calibrazione())
+    best, p = a["best"], a["prob"]
+    c = st.columns(3)
+    c[0].metric("Pronostico", best["mercato"])
+    c[1].metric("Confidence", f'{best["confidence"]:.0f}/100')
+    c[2].metric("Probabilità", f'{best["prob"]*100:.0f}%')
+    c = st.columns(3)
+    c[0].metric("1", f'{p["1"]*100:.0f}%')
+    c[1].metric("X", f'{p["X"]*100:.0f}%')
+    c[2].metric("2", f'{p["2"]*100:.0f}%')
+    c = st.columns(2)
+    c[0].metric("Over 2.5", f'{a["over_prob"]*100:.0f}%')
+    c[1].metric("Goal", f'{a["btts_prob"]*100:.0f}%')
+    if a.get("alerts"):
+        st.markdown("**🚨 Alert quota:**")
+        for al in a["alerts"]:
+            st.markdown(f"- {al['mercato']}: **{al['livello']}** "
+                        f"(stat {al['prob']*100:.0f}% vs quota {al['market_prob']*100:.0f}%)")
+    st.markdown("**📋 Riepilogo da copiare (note):**")
+    st.code(riepilogo_testo(a, df, home, away, odds, row=row), language=None)
+    st.caption("Per la scheda completa con tutti i mercati e per regolare i pesi, "
+               "usa 🔮 Analisi & Pronostico.")
+
+
 def pagina_database(user):
     st.header("🗄️ Database partite")
 
@@ -1109,17 +1172,37 @@ def pagina_database(user):
         if not dac.empty:
             with st.expander(f"🧩 Partite da compilare ({len(dac)})", expanded=True):
                 st.caption("Partite pianificate in attesa di ultimi risultati / quote. "
-                           "Escono da qui quando aggiungi risultato o quote.")
-                st.dataframe(
-                    pd.DataFrame({
-                        "Data": dac["data"],
-                        "Ora": dac.get("ora"),
-                        "Competizione": dac.get("competizione"),
-                        "Tipo": dac.get("tipo_partita"),
-                        "Casa": dac["squadra_casa"],
-                        "Trasferta": dac["squadra_trasferta"],
-                    }),
-                    use_container_width=True, hide_index=True)
+                           "Escono da qui quando aggiungi risultato o quote. "
+                           "Spunta 🗑️ per eliminarne una.")
+                vdac = pd.DataFrame({
+                    "id": dac["id"],
+                    "Data": dac["data"],
+                    "Ora": dac.get("ora"),
+                    "Competizione": dac.get("competizione"),
+                    "Casa": dac["squadra_casa"],
+                    "Trasferta": dac["squadra_trasferta"],
+                    "🗑️": [False] * len(dac),
+                }).reset_index(drop=True)
+                edac = st.data_editor(
+                    vdac, use_container_width=True, hide_index=True, key="editor_dac",
+                    disabled=["id", "Data", "Ora", "Competizione", "Casa", "Trasferta"],
+                    column_config={"id": None,
+                                   "Data": st.column_config.DateColumn(format="DD.MM.YY"),
+                                   "🗑️": st.column_config.CheckboxColumn("🗑️")})
+                el_dac = edac[edac["🗑️"] == True]
+                if len(el_dac):
+                    st.warning(f"{len(el_dac)} partite selezionate per l'eliminazione.")
+                    conf_dac = st.checkbox("Confermo l'eliminazione", key="conf_dac")
+                    if st.button("🗑️ Elimina selezionate", key="del_dac"):
+                        if not conf_dac:
+                            st.warning("Spunta la conferma prima di eliminare.")
+                        else:
+                            try:
+                                elimina_partite([r["id"] for _, r in el_dac.iterrows()])
+                                st.success(f"Eliminate {len(el_dac)} partite.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Errore: {e}")
 
     # filtro rapido
     q = st.text_input("Cerca squadra")
@@ -1153,6 +1236,7 @@ def pagina_database(user):
         "Trasferta": vis["squadra_trasferta"],
         "Gol Casa": vis["gol_casa"].astype("Int64"),
         "Gol Trasferta": vis["gol_trasferta"].astype("Int64"),
+        "🔍": [False] * len(vis),
         "🗑️": [False] * len(vis),
     }).reset_index(drop=True)
     orig = vista.copy()   # per confrontare cosa è cambiato
@@ -1165,10 +1249,19 @@ def pagina_database(user):
             "Data": st.column_config.DateColumn(format="DD.MM.YY"),
             "Gol Casa": st.column_config.NumberColumn(min_value=0, step=1),
             "Gol Trasferta": st.column_config.NumberColumn(min_value=0, step=1),
+            "🔍": st.column_config.CheckboxColumn(
+                "🔍", help="Spunta una partita per aprirne sotto il dettaglio con l'analisi."),
             "🗑️": st.column_config.CheckboxColumn(
                 "🗑️", help="Spunta le partite da eliminare, poi usa il pulsante 'Elimina'."),
         },
     )
+
+    # --- dettaglio/analisi della partita spuntata con 🔍 ---
+    da_vedere = edit[edit["🔍"] == True] if "🔍" in edit else edit.iloc[0:0]
+    if len(da_vedere) >= 1:
+        mid = da_vedere.iloc[0]["id"]
+        rr = df[df["id"] == mid].iloc[0]
+        _dettaglio_partita(df, rr, carica_competizioni())
 
     col1, col2 = st.columns(2)
     if col1.button("💾 Salva modifiche risultati", type="primary"):
@@ -1283,11 +1376,14 @@ def pagina_database(user):
                 qng = _in("No Goal", "quota_iniziale_nogoal", "ng")
                 vng = _in("Var. NoGoal", "variazione_quota_nogoal", "vng")
 
-            st.markdown("**Valori rosa** (opzionali: mitigano il livello di lega)")
+            st.markdown("**Forma** (indice del sito, es. 7.21) e **valori rosa** "
+                        "(opzionali: i valori rosa mitigano il livello di lega)")
             c = st.columns(2)
             with c[0]:
+                fcasa = _in("Forma casa", "forma_casa", "fc")
                 vcasa = _in("Valore rosa casa", "val_casa", "vc")
             with c[1]:
+                ftras = _in("Forma trasferta", "forma_trasferta", "ft")
                 vtras = _in("Valore rosa trasferta", "val_trasferta", "vt")
 
             if st.button("💾 Salva quote/valori", type="primary", key="save_quote"):
@@ -1298,6 +1394,7 @@ def pagina_database(user):
                     "variazione_quota_over": vov, "variazione_quota_under": vun,
                     "quota_iniziale_goal": qgo, "quota_iniziale_nogoal": qng,
                     "variazione_quota_goal": vgo, "variazione_quota_nogoal": vng,
+                    "forma_casa": fcasa, "forma_trasferta": ftras,
                     "val_casa": vcasa, "val_trasferta": vtras,
                     "aggiornato_il": datetime.utcnow().isoformat(),
                 }
@@ -2105,6 +2202,52 @@ def _eff_odds(row):
         "goal": e("quota_iniziale_goal", "variazione_quota_goal"),
         "nogoal": e("quota_iniziale_nogoal", "variazione_quota_nogoal"),
     }
+
+
+def _mappa_livelli(comp_df):
+    """Mappa competizione->livello, con tutte le forme (corto, lungo, lungo+nazione)."""
+    livelli = {}
+    if comp_df is not None and not comp_df.empty and "livello" in comp_df:
+        for _, cc in comp_df.iterrows():
+            liv = cc.get("livello")
+            try:
+                if pd.isna(liv):
+                    continue
+            except (TypeError, ValueError):
+                if liv is None:
+                    continue
+            for kk in _chiavi_competizione(cc):
+                livelli[kk] = int(liv)
+    return livelli
+
+
+def _variazioni_da_row(row):
+    """Estrae le variazioni di quota dalla riga partita, nel formato del motore."""
+    variazioni = {}
+    for kk in ("1", "x", "2", "over", "under", "goal", "nogoal"):
+        v = row.get(f"variazione_quota_{kk}")
+        try:
+            if v is not None and not pd.isna(v):
+                mapk = {"x": "X", "over": "over25", "under": "under25"}.get(kk, kk)
+                variazioni[mapk] = float(v)
+        except (TypeError, ValueError):
+            pass
+    return variazioni
+
+
+def _analizza_row(df, row, comp_df, config=None, calibratori=None):
+    """Prepara tutti gli input dalla riga partita e lancia il motore. Usato sia dalla
+    pagina Analisi sia dal dettaglio nel Database (stessa logica, nessuna divergenza)."""
+    home, away = row["squadra_casa"], row["squadra_trasferta"]
+    odds = _eff_odds(row)
+    rose = (row.get("val_casa"), row.get("val_trasferta"))
+    tp = row.get("tipo_partita")
+    tipo_target = tp if (tp and str(tp) not in ("ND", "Non assegnata", "None")) else None
+    a = analisi.analizza_partita(
+        home, away, df, odds=odds, data_partita=row.get("data"), config=config,
+        calibratori=calibratori, rose=rose, tipo_partita_target=tipo_target,
+        livelli=_mappa_livelli(comp_df), variazioni=_variazioni_da_row(row))
+    return a, home, away, odds
 
 
 def _barra(pct, col):
