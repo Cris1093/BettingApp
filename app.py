@@ -190,6 +190,22 @@ def parse_incontri(testo):
     righe = [r.strip() for r in testo.splitlines()]
     righe = [r for r in righe if r and not re.search(r"mostra\s+pi", r, re.I)]
 
+    # La sezione "Testa a Testa" (H2H) sta tra le ultime partite e le quote finali.
+    # La sua ultima partita non ha la lettera esito, quindi "inghiottirebbe" le righe
+    # delle quote facendole perdere. La rimuoviamo conservando le righe-quota in coda.
+    idx_h2h = next((i for i, r in enumerate(righe)
+                    if re.search(r"testa\s*a\s*testa|head\s*to\s*head|precedenti", r, re.I)),
+                   None)
+    if idx_h2h is not None:
+        coda_num = []
+        for r in reversed(righe[idx_h2h + 1:]):
+            toks = [t.replace(",", ".") for t in r.split()]
+            if toks and all(re.fullmatch(r"-?\d+(\.\d+)?", t) for t in toks):
+                coda_num.insert(0, r)
+            else:
+                break
+        righe = righe[:idx_h2h] + coda_num
+
     headers = [(i, _team_da_header(r)) for i, r in enumerate(righe) if _is_header(r)]
     if not headers:
         return pd.DataFrame(), None, None, {}
