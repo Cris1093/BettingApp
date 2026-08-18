@@ -1117,6 +1117,97 @@ def pagina_estrattore(user):
 # =============================================================================
 #  PAGINA: DATABASE
 # =============================================================================
+def genera_docx_archivio(df, comp_df, con_analisi=True):
+    """Crea un archivio Word: una pagina per fixture (partita seguita) con intestazione,
+    ultime partite delle due squadre, (opzionale) analisi & pronostico, e risultato."""
+    try:
+        from docx import Document
+    except Exception:
+        raise RuntimeError("Libreria python-docx non disponibile. "
+                           "Aggiungi 'python-docx' a requirements.txt.")
+    doc = Document()
+    fx = df[df["is_target"] == True] if "is_target" in df.columns else df.iloc[0:0]
+    if "data" in fx.columns:
+        fx = fx.sort_values("data", ascending=False)
+    if fx.empty:
+        doc.add_heading("Archivio partite", level=1)
+        doc.add_paragraph("Nessuna partita seguita da esportare.")
+        bio = io.BytesIO(); doc.save(bio); return bio.getvalue()
+
+    pron = carica_pronostici()
+    calibr = carica_calibrazione()
+    first = True
+    for _, row in fx.iterrows():
+        if not first:
+            doc.add_page_break()
+        first = False
+        home, away = row["squadra_casa"], row["squadra_trasferta"]
+        doc.add_heading(f"{home} - {away}", level=1)
+        data = row["data"].strftime("%d.%m.%Y") if hasattr(row["data"], "strftime") else _txt(row.get("data"))
+        meta_parts = []
+        if _txt(row.get("competizione")):
+            meta_parts.append(f"Campionato: {_txt(row.get('competizione'))}")
+        if data:
+            meta_parts.append(f"Data: {data}")
+        if _txt(row.get("ora")):
+            meta_parts.append(f"Ora: {_txt(row.get('ora'))}")
+        if meta_parts:
+            doc.add_paragraph().add_run("    ".join(meta_parts)).italic = True
+
+        doc.add_heading(f"Ultime partite {home}", level=2)
+        for r in _ultime_partite_testo(df, home):
+            doc.add_paragraph(r, style="List Bullet")
+        doc.add_heading(f"Ultime partite {away}", level=2)
+        for r in _ultime_partite_testo(df, away):
+            doc.add_paragraph(r, style="List Bullet")
+
+        if con_analisi:
+            doc.add_heading("Analisi e pronostico", level=2)
+            finita = _num_ok(row.get("gol_casa")) and _num_ok(row.get("gol_trasferta"))
+            rec = None
+            if not pron.empty and "partita_id" in pron.columns:
+                m = pron[pron["partita_id"] == str(row["id"])]
+                if not m.empty:
+                    rec = m.iloc[0]
+            if rec is not None:  # pronostico pre-partita salvato (foto corretta)
+                conf = "" if pd.isna(rec.get("confidence")) else f" (confidence {int(rec['confidence'])}/100)"
+                doc.add_paragraph().add_run(f"Pronostico: {_txt(rec.get('mercato'))}{conf}").bold = True
+
+                def _pp(x):
+                    return "-" if pd.isna(x) else f"{float(x)*100:.0f}%"
+                doc.add_paragraph(
+                    f"1 {_pp(rec.get('prob_1'))}  X {_pp(rec.get('prob_x'))}  2 {_pp(rec.get('prob_2'))}"
+                    f"   |   Over 2.5 {_pp(rec.get('prob_over25'))}   Goal {_pp(rec.get('prob_goal'))}")
+            elif not finita:  # partita futura senza pronostico salvato: calcolo dal vivo
+                try:
+                    a, h, aw, odds = _analizza_row(df, row, comp_df, calibratori=calibr)
+                    b, p = a["best"], a["prob"]
+                    doc.add_paragraph().add_run(
+                        f"Pronostico: {b['mercato']} (confidence {b['confidence']:.0f}/100)").bold = True
+                    doc.add_paragraph(
+                        f"1 {p['1']*100:.0f}%  X {p['X']*100:.0f}%  2 {p['2']*100:.0f}%"
+                        f"   |   Over 2.5 {a['over_prob']*100:.0f}%   Goal {a['btts_prob']*100:.0f}%")
+                    if a.get("alerts"):
+                        doc.add_paragraph("Alert quota:")
+                        for al in a["alerts"]:
+                            doc.add_paragraph(
+                                f"{al['mercato']}: {al['livello']} "
+                                f"(stat {al['prob']*100:.0f}% vs quota {al['market_prob']*100:.0f}%)",
+                                style="List Bullet")
+                except Exception:
+                    doc.add_paragraph("Analisi non disponibile.")
+            else:
+                doc.add_paragraph("Nessun pronostico pre-partita salvato per questa partita.")
+
+        doc.add_heading("Risultato", level=2)
+        if _num_ok(row.get("gol_casa")) and _num_ok(row.get("gol_trasferta")):
+            doc.add_paragraph(f"{int(row['gol_casa'])} - {int(row['gol_trasferta'])}")
+        else:
+            doc.add_paragraph("In attesa")
+
+    bio = io.BytesIO(); doc.save(bio); return bio.getvalue()
+
+
 def _dettaglio_partita(df, row, comp_df):
     """Mostra la scheda di una partita: analisi dal vivo se non ha risultato,
     pronostico pre-partita salvato se è già finita (niente ricalcolo 'col senno di poi')."""
@@ -2125,6 +2216,28 @@ def pagina_configurazione(user):
                     st.rerun()
                 except Exception as e:
                     st.error(f"Errore: {e}")
+
+    st.divider()
+    st.subheader("📄 Archivio partite (Word)")
+    st.caption("Scarica un documento Word con una pagina per partita seguita: intestazione "
+               "(squadre, campionato, data, ora), ultime partite delle due squadre, e il "
+               "risultato. Un database esterno consultabile anche fuori dall'app.")
+    ca = st.columns(2)
+    try:
+        dfp = carica_partite()
+        cdf = carica_competizioni()
+        ca[0].download_button(
+            "⬇️ Word completo (con analisi)",
+            data=genera_docx_archivio(dfp, cdf, con_analisi=True),
+            file_name="archivio_partite_con_analisi.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        ca[1].download_button(
+            "⬇️ Word senza analisi",
+            data=genera_docx_archivio(dfp, cdf, con_analisi=False),
+            file_name="archivio_partite.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    except Exception as e:
+        st.error(f"Impossibile generare il Word: {e}")
 
     st.divider()
     st.subheader("🏆 Competizioni")
