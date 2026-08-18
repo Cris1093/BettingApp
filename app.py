@@ -1228,6 +1228,17 @@ def pagina_database(user):
     ordina = ["_senza_ris"] + (["data"] if "data" in vis.columns else [])
     vis = vis.sort_values(ordina, ascending=[False] + [False] * (len(ordina) - 1))
 
+    # opzioni competizione dal menu (competizioni a sistema) + valori già presenti
+    comp_df = carica_competizioni()
+    opzioni_comp = []
+    for _, cr in comp_df.sort_values("nome_lungo", na_position="last").iterrows() \
+            if not comp_df.empty else []:
+        lab = label_competizione(cr.get("nome_lungo"), cr.get("nazione")) or _txt(cr.get("nome_corto"))
+        if lab:
+            opzioni_comp.append(lab)
+    esistenti = [_txt(x) for x in vis.get("competizione", pd.Series(dtype=object)) if _txt(x)]
+    opzioni_comp = sorted(set(opzioni_comp) | set(esistenti))
+
     vista = pd.DataFrame({
         "id": vis["id"],
         "Data": vis["data"],
@@ -1247,6 +1258,10 @@ def pagina_database(user):
         column_config={
             "id": None,  # nascosta
             "Data": st.column_config.DateColumn(format="DD.MM.YY"),
+            "Competizione": st.column_config.SelectboxColumn(
+                options=opzioni_comp,
+                help="Scegli tra le competizioni a sistema (Configurazione). "
+                     "Cambiarla aggiorna anche la categoria della partita."),
             "Gol Casa": st.column_config.NumberColumn(min_value=0, step=1),
             "Gol Trasferta": st.column_config.NumberColumn(min_value=0, step=1),
             "🔍": st.column_config.CheckboxColumn(
@@ -1271,12 +1286,18 @@ def pagina_database(user):
         for i in range(len(edit)):
             gc, gt = _val(edit.iloc[i]["Gol Casa"]), _val(edit.iloc[i]["Gol Trasferta"])
             gc0, gt0 = _val(orig.iloc[i]["Gol Casa"]), _val(orig.iloc[i]["Gol Trasferta"])
-            if gc == gc0 and gt == gt0:
+            comp_new = _txt(edit.iloc[i]["Competizione"]) or None
+            comp_old = _txt(orig.iloc[i]["Competizione"]) or None
+            if gc == gc0 and gt == gt0 and comp_new == comp_old:
                 continue   # riga non modificata: non la tocco (salvataggio istantaneo)
             rec = {"id": edit.iloc[i]["id"], "gol_casa": gc, "gol_trasferta": gt,
                    "aggiornato_il": datetime.utcnow().isoformat()}
             if gc is not None and gt is not None:
                 rec["da_compilare"] = False
+            if comp_new != comp_old:
+                rec["competizione"] = comp_new
+                # riallinea la categoria alla nuova competizione
+                rec["tipo_partita"] = categoria_o_nd(comp_new, comp_df)
             records.append(rec)
         try:
             if records:
