@@ -543,8 +543,9 @@ def upsert_pronostico(record):
     try:
         _do(record)
     except Exception as e:
-        if "riepilogo" in str(e).lower():
-            _do({k: v for k, v in record.items() if k != "riepilogo"})
+        msg = str(e).lower()
+        if "riepilogo" in msg or "scheda_json" in msg or "column" in msg:
+            _do({k: v for k, v in record.items() if k not in ("riepilogo", "scheda_json")})
         else:
             raise
     st.cache_data.clear()
@@ -718,6 +719,19 @@ ND = "ND"  # categoria/tipo non determinabile
 
 def categoria_o_nd(codice_o_label, comp_df):
     return categoria_di(codice_o_label, comp_df) or ND
+
+
+def _label_da_comp(val, comp_df):
+    """Traduce il valore salvato (es. codice '2L') nel nome leggibile dell'anagrafica
+    ('Vtora Liga | Bulgaria'). Se non è in anagrafica, restituisce il valore così com'è."""
+    v = _txt(val)
+    if not v or comp_df is None or comp_df.empty:
+        return v
+    k = _key(v)
+    for _, c in comp_df.iterrows():
+        if k in _chiavi_competizione(c):
+            return label_competizione(c.get("nome_lungo"), c.get("nazione")) or v
+    return v
 
 
 # =============================================================================
@@ -1093,8 +1107,16 @@ def pagina_estrattore(user):
                     (part_now["squadra_casa"].map(lambda x: _key(_norm_squadra(x))) == nc) &
                     (part_now["squadra_trasferta"].map(lambda x: _key(_norm_squadra(x))) == nt)]
                 if not cand.empty:
-                    pend = cand[cand.get("da_compilare") == True] if "da_compilare" in cand else cand.iloc[0:0]
-                    esistente = pend.iloc[0] if not pend.empty else cand.iloc[0]
+                    # riusa SOLO una partita pianificata o una fixture-target ancora
+                    # SENZA risultato — mai una partita storica già giocata (altrimenti
+                    # la nuova sfida erediterebbe data e risultato di quella vecchia).
+                    dac = (cand["da_compilare"] == True) if "da_compilare" in cand \
+                        else pd.Series(False, index=cand.index)
+                    tgt = (cand["is_target"] == True) if "is_target" in cand \
+                        else pd.Series(False, index=cand.index)
+                    senza_ris = cand["gol_casa"].isna() | cand["gol_trasferta"].isna()
+                    riusa = cand[(dac | tgt) & senza_ris]
+                    esistente = riusa.iloc[0] if not riusa.empty else None
             try:
                 if esistente is not None:
                     upd = dict(payload)
@@ -1146,7 +1168,7 @@ def genera_docx_archivio(df, comp_df, con_analisi=True):
         data = row["data"].strftime("%d.%m.%Y") if hasattr(row["data"], "strftime") else _txt(row.get("data"))
         meta_parts = []
         if _txt(row.get("competizione")):
-            meta_parts.append(f"Campionato: {_txt(row.get('competizione'))}")
+            meta_parts.append(f"Campionato: {_label_da_comp(row.get('competizione'), comp_df)}")
         if data:
             meta_parts.append(f"Data: {data}")
         if _txt(row.get("ora")):
@@ -1161,43 +1183,88 @@ def genera_docx_archivio(df, comp_df, con_analisi=True):
         for r in _ultime_partite_testo(df, away):
             doc.add_paragraph(r, style="List Bullet")
 
+        # snapshot analisi salvato (per quote + mercati completi)
+        snap = None
+        rec = None
+        if not pron.empty and "partita_id" in pron.columns:
+            m = pron[pron["partita_id"] == str(row["id"])]
+            if not m.empty:
+                rec = m.iloc[0]
+                if "scheda_json" in rec.index and _txt(rec.get("scheda_json")):
+                    try:
+                        snap = json.loads(rec["scheda_json"])
+                    except Exception:
+                        snap = None
+        finita = _num_ok(row.get("gol_casa")) and _num_ok(row.get("gol_trasferta"))
+        # se non ho snapshot e la partita è futura, calcolo dal vivo
+        live = None
+        if snap is None and not finita:
+            try:
+                live, _h, _a, _o = _analizza_row(df, row, comp_df, calibratori=calibr)
+            except Exception:
+                live = None
+        dati = snap or live
+
+        # QUOTE (in entrambe le versioni del Word)
+        odds = (dati.get("odds") if dati else None) or _eff_odds(row)
+        if odds:
+            doc.add_heading("Quote", level=2)
+            etich = [("1", "1"), ("X", "X"), ("2", "2"), ("over25", "Over 2.5"),
+                     ("under25", "Under 2.5"), ("goal", "Goal"), ("nogoal", "No Goal")]
+            righe_q = [f"{lab}: {odds[k]}" for k, lab in etich if odds.get(k)]
+            if righe_q:
+                doc.add_paragraph("   ·   ".join(righe_q))
+
         if con_analisi:
             doc.add_heading("Analisi e pronostico", level=2)
-            finita = _num_ok(row.get("gol_casa")) and _num_ok(row.get("gol_trasferta"))
-            rec = None
-            if not pron.empty and "partita_id" in pron.columns:
-                m = pron[pron["partita_id"] == str(row["id"])]
-                if not m.empty:
-                    rec = m.iloc[0]
-            if rec is not None:  # pronostico pre-partita salvato (foto corretta)
-                conf = "" if pd.isna(rec.get("confidence")) else f" (confidence {int(rec['confidence'])}/100)"
-                doc.add_paragraph().add_run(f"Pronostico: {_txt(rec.get('mercato'))}{conf}").bold = True
-
-                def _pp(x):
-                    return "-" if pd.isna(x) else f"{float(x)*100:.0f}%"
+            if dati:
+                p = dati["prob"]
+                b = dati["best"]
+                conf = f" (confidence {b['confidence']:.0f}/100)" if b.get("confidence") is not None else ""
+                doc.add_paragraph().add_run(f"Pronostico: {b['mercato']}{conf}").bold = True
                 doc.add_paragraph(
-                    f"1 {_pp(rec.get('prob_1'))}  X {_pp(rec.get('prob_x'))}  2 {_pp(rec.get('prob_2'))}"
-                    f"   |   Over 2.5 {_pp(rec.get('prob_over25'))}   Goal {_pp(rec.get('prob_goal'))}")
-            elif not finita:  # partita futura senza pronostico salvato: calcolo dal vivo
-                try:
-                    a, h, aw, odds = _analizza_row(df, row, comp_df, calibratori=calibr)
-                    b, p = a["best"], a["prob"]
-                    doc.add_paragraph().add_run(
-                        f"Pronostico: {b['mercato']} (confidence {b['confidence']:.0f}/100)").bold = True
+                    f"1 {p['1']*100:.0f}%   X {p['X']*100:.0f}%   2 {p['2']*100:.0f}%"
+                    f"      Over 2.5 {dati['over_prob']*100:.0f}%   Goal {dati['btts_prob']*100:.0f}%")
+                if p.get("lambda_home") is not None:
                     doc.add_paragraph(
-                        f"1 {p['1']*100:.0f}%  X {p['X']*100:.0f}%  2 {p['2']*100:.0f}%"
-                        f"   |   Over 2.5 {a['over_prob']*100:.0f}%   Goal {a['btts_prob']*100:.0f}%")
-                    if a.get("alerts"):
-                        doc.add_paragraph("Alert quota:")
-                        for al in a["alerts"]:
-                            doc.add_paragraph(
-                                f"{al['mercato']}: {al['livello']} "
-                                f"(stat {al['prob']*100:.0f}% vs quota {al['market_prob']*100:.0f}%)",
-                                style="List Bullet")
-                except Exception:
-                    doc.add_paragraph("Analisi non disponibile.")
+                        f"Gol attesi: {home} {p['lambda_home']:.2f} · {away} {p['lambda_away']:.2f}")
+                if p.get("risultati"):
+                    doc.add_paragraph("Risultati più probabili: " +
+                                      " · ".join(f"{r['risultato']} ({r['p']*100:.0f}%)"
+                                                 for r in p["risultati"][:6]))
+                # TUTTI I MERCATI in tabella
+                mercati = sorted(dati["mercati"], key=lambda x: -x["confidence"])
+                if mercati:
+                    doc.add_paragraph().add_run("Tutti i mercati:").bold = True
+                    tab = doc.add_table(rows=1, cols=4)
+                    tab.style = "Light Grid Accent 1"
+                    hdr = tab.rows[0].cells
+                    hdr[0].text, hdr[1].text, hdr[2].text, hdr[3].text = \
+                        "Mercato", "Confidence", "Statistica", "Quota / alert"
+                    for mm in mercati:
+                        cells = tab.add_row().cells
+                        cells[0].text = str(mm["mercato"])
+                        cells[1].text = f"{mm['confidence']:.0f}/100"
+                        cells[2].text = f"{mm['prob']*100:.0f}%"
+                        q = ""
+                        if mm.get("market_prob") is not None:
+                            q = f"{mm['market_prob']*100:.0f}%"
+                            if mm.get("quota"):
+                                q += f" @ {mm['quota']:.2f}"
+                            if mm.get("alert"):
+                                q += f"  ⚠{mm['alert']}"
+                        cells[3].text = q
+                if dati.get("alerts"):
+                    doc.add_paragraph().add_run("Alert quota:").bold = True
+                    for al in dati["alerts"]:
+                        doc.add_paragraph(
+                            f"{al['mercato']}: {al['livello']} "
+                            f"(stat {al['prob']*100:.0f}% vs quota {al['market_prob']*100:.0f}%)",
+                            style="List Bullet")
+            elif finita:
+                doc.add_paragraph("Nessuna scheda pre-partita salvata per questa partita.")
             else:
-                doc.add_paragraph("Nessun pronostico pre-partita salvato per questa partita.")
+                doc.add_paragraph("Analisi non disponibile.")
 
         doc.add_heading("Risultato", level=2)
         if _num_ok(row.get("gol_casa")) and _num_ok(row.get("gol_trasferta")):
@@ -1208,67 +1275,174 @@ def genera_docx_archivio(df, comp_df, con_analisi=True):
     bio = io.BytesIO(); doc.save(bio); return bio.getvalue()
 
 
+def _snapshot_analisi(a, odds):
+    """Cattura l'analisi COMPLETA in formato dati (JSON-safe) per riproporla identica
+    dopo la partita, senza ricalcolare."""
+    p = a["prob"]
+    return {
+        "prob": {"1": p["1"], "X": p["X"], "2": p["2"],
+                 "lambda_home": p.get("lambda_home"), "lambda_away": p.get("lambda_away"),
+                 "risultati": [{"risultato": r["risultato"], "p": r["p"]}
+                               for r in p.get("risultati", [])[:8]]},
+        "over_prob": a["over_prob"], "btts_prob": a["btts_prob"],
+        "over_prob_raw": a.get("over_prob_raw"), "btts_prob_raw": a.get("btts_prob_raw"),
+        "elo": a.get("elo", {}), "risultati_per_esito": a.get("risultati_per_esito", {}),
+        "griglia_coerente": a.get("griglia_coerente"),
+        "blended_mercato": a.get("blended_mercato"), "calibrato": a.get("calibrato"),
+        "reasons": list(a.get("reasons", [])), "risks": list(a.get("risks", [])),
+        "alerts": a.get("alerts", []),
+        "best": {k: a["best"].get(k) for k in
+                 ("mercato", "confidence", "prob", "market_prob", "alert", "signal_ratio")},
+        "mercati": [{k: m.get(k) for k in ("mercato", "gruppo", "prob", "confidence",
+                                           "market_prob", "quota", "alert", "var_quota")}
+                    for m in a["mercati"]],
+        "odds": odds or {},
+    }
+
+
+def render_scheda_st(a, home, away):
+    """Disegna la scheda COMPLETA (miglior pronostico, probabilità, alert, tutti i mercati).
+    Accetta sia l'analisi dal vivo sia uno snapshot salvato: stesse chiavi."""
+    p = a["prob"]
+    best = a["best"]
+    col = _col_conf(best["confidence"])
+    reasons = "".join(f'<div style="color:{COL["hi"]};font-size:13px;margin-top:3px;">✓ {_esc(x)}</div>'
+                      for x in a.get("reasons", [])) or \
+        f'<div style="color:{COL["lo"]};font-size:13px;">—</div>'
+    risks = "".join(f'<div style="color:{COL["loss"]};font-size:13px;margin-top:3px;">⚠ {_esc(x)}</div>'
+                    for x in a.get("risks", [])) or \
+        f'<div style="color:{COL["lo"]};font-size:13px;">nessun rischio rilevante</div>'
+    consenso = ""
+    if best.get("market_prob") is not None:
+        acol = {"basso": COL["draw"], "medio": "#e08a2b", "alto": COL["loss"]}.get(best.get("alert"))
+        base = (f'<div style="color:{COL["lo"]};font-size:12px;margin-top:10px;">'
+                f'Statistiche {best["prob"]*100:.0f}% · quota (grezza) {best["market_prob"]*100:.0f}%')
+        if best.get("alert") and acol:
+            base += f' — <span style="color:{acol};font-weight:600;">alert {best["alert"]}</span>'
+        consenso = base + "</div>"
+    sr = best.get("signal_ratio")
+    barra_sr = _barra(sr * 100, col) if sr is not None else ""
+    st.html(
+        f'<div style="{FONT}max-width:520px;background:{COL["panel"]};border:1px solid {COL["line"]};'
+        f'border-left:4px solid {col};border-radius:14px;padding:16px;">'
+        f'<div style="color:{COL["lo"]};font-size:11px;text-transform:uppercase;letter-spacing:.15em;">'
+        f'Miglior pronostico</div>'
+        f'<div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:4px;">'
+        f'<span style="color:{COL["hi"]};font-size:26px;font-weight:700;">{_esc(best["mercato"])}</span>'
+        f'<span style="color:{col};font-size:22px;font-weight:700;">{best["confidence"]:.0f}<span '
+        f'style="font-size:13px;color:{COL["lo"]};">/100</span></span></div>'
+        f'<div style="margin-top:12px;">{reasons}</div>'
+        f'<div style="margin-top:10px;">{risks}</div>{consenso}</div>')
+
+    st.subheader("📈 Probabilità del modello")
+    cc = st.columns(3)
+    cc[0].metric(f"1 {home}", f'{p["1"]*100:.0f}%')
+    cc[1].metric("X", f'{p["X"]*100:.0f}%')
+    cc[2].metric(f"2 {away}", f'{p["2"]*100:.0f}%')
+    cc = st.columns(2)
+    cc[0].metric("Over 2.5", f'{a["over_prob"]*100:.0f}%')
+    cc[1].metric("Goal", f'{a["btts_prob"]*100:.0f}%')
+    if p.get("lambda_home") is not None:
+        elo = a.get("elo", {})
+        extra = (f' · Elo {elo["home"]:.0f} vs {elo["away"]:.0f}'
+                 if elo.get("home") is not None else "")
+        st.caption(f'Gol attesi: {home} {p["lambda_home"]:.2f} · {away} {p["lambda_away"]:.2f}{extra}')
+    if p.get("risultati"):
+        st.markdown("**Risultati più probabili:** " +
+                    " · ".join(f'{r["risultato"]} ({r["p"]*100:.0f}%)' for r in p["risultati"][:6]))
+
+    if a.get("alerts"):
+        st.subheader("🚨 Alert quota")
+        acol = {"basso": COL["draw"], "medio": "#e08a2b", "alto": COL["loss"]}
+        rows = ""
+        for al in a["alerts"]:
+            colr = acol.get(al["livello"], COL["lo"])
+            verso = "quota più alta" if (al.get("delta") or 0) > 0 else "quota più bassa"
+            rows += (
+                f'<div style="{FONT}display:flex;justify-content:space-between;align-items:center;'
+                f'background:{COL["panel"]};border:1px solid {COL["line"]};border-left:4px solid {colr};'
+                f'border-radius:10px;padding:8px 12px;margin-bottom:6px;max-width:520px;">'
+                f'<span style="color:{COL["hi"]};font-weight:600;">{_esc(al["mercato"])}</span>'
+                f'<span style="color:{COL["lo"]};font-size:12px;">stat {al["prob"]*100:.0f}% · '
+                f'quota {al["market_prob"]*100:.0f}% · '
+                f'<b style="color:{colr};text-transform:uppercase;">{al["livello"]}</b> ({verso})</span></div>')
+        st.html(rows)
+
+    st.subheader("🎯 Tutti i mercati")
+    acol = {"basso": COL["draw"], "medio": "#e08a2b", "alto": COL["loss"]}
+    cards = ""
+    for m in sorted(a["mercati"], key=lambda x: -x["confidence"]):
+        mk = ""
+        if m.get("market_prob") is not None:
+            q = f' @ {m["quota"]:.2f}' if m.get("quota") else ""
+            mk = f' · quota {m["market_prob"]*100:.0f}%{q}'
+            if m.get("alert"):
+                colm = acol.get(m["alert"], COL["lo"])
+                mk += f' · <b style="color:{colm};">⚠{m["alert"]}</b>'
+            if m.get("var_quota") and abs(m["var_quota"]) >= 0.05:
+                mk += f' · quota {"↓" if m["var_quota"]>0 else "↑"}'
+        elif m.get("quota"):
+            mk = f' · quota {m["quota"]:.2f}'
+        cards += (
+            f'<div style="{FONT}background:{COL["panel"]};border:1px solid {COL["line"]};'
+            f'border-radius:12px;padding:10px 14px;margin-bottom:7px;max-width:520px;">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;">'
+            f'<span style="color:{COL["hi"]};font-weight:600;">{_esc(m["mercato"])}</span>'
+            f'<span style="color:{COL["lo"]};font-size:12px;">conf '
+            f'<b style="color:{_col_conf(m["confidence"])};">{m["confidence"]:.0f}</b>/100 · '
+            f'stat {m["prob"]*100:.0f}%{mk}</span></div>'
+            f'<div style="margin-top:7px;">{_barra(m["confidence"], _col_conf(m["confidence"]))}</div></div>')
+    st.html(cards)
+
+
 def _dettaglio_partita(df, row, comp_df):
-    """Mostra la scheda di una partita: analisi dal vivo se non ha risultato,
-    pronostico pre-partita salvato se è già finita (niente ricalcolo 'col senno di poi')."""
+    """Scheda COMPLETA di una partita: analisi dal vivo se non ha risultato, scheda
+    pre-partita salvata (integrale) se è già finita (niente ricalcolo col senno di poi)."""
     home, away = row["squadra_casa"], row["squadra_trasferta"]
     finita = _num_ok(row.get("gol_casa")) and _num_ok(row.get("gol_trasferta"))
     st.divider()
     st.subheader(f"🔎 {home} - {away}")
+    meta = []
+    if _txt(row.get("competizione")):
+        meta.append(_label_da_comp(row.get("competizione"), comp_df))
+    if _txt(row.get("ora")):
+        meta.append(f"ore {_txt(row.get('ora'))}")
+    if meta:
+        st.caption(" · ".join(meta))
 
     if finita:
         gc, gt = int(row["gol_casa"]), int(row["gol_trasferta"])
         st.markdown(f"**Risultato finale: {gc} - {gt}**")
-        # recupera il pronostico pre-partita salvato (foto fatta al momento giusto)
         pron = carica_pronostici()
         rec = None
-        if not pron.empty and "partita_id" in pron:
+        if not pron.empty and "partita_id" in pron.columns:
             m = pron[pron["partita_id"] == str(row["id"])]
             if not m.empty:
                 rec = m.iloc[0]
-        if rec is None:
-            st.info("Per questa partita non è stato salvato un pronostico pre-partita, quindi "
-                    "non posso mostrarlo. Non lo ricalcolo a posteriori perché userebbe dati "
-                    "successivi alla partita (non sarebbe più una previsione).")
-            return
-        won = _pronostico_vinto(rec.get("mercato") or "", gc, gt)
-        esito = "✅ vinto" if won is True else ("❌ perso" if won is False else "—")
-        c = st.columns(3)
-        c[0].metric("Pronostico", _txt(rec.get("mercato")))
-        c[1].metric("Confidence", f'{int(rec.get("confidence"))}/100'
-                    if not pd.isna(rec.get("confidence")) else "—")
-        c[2].metric("Esito", esito)
-        txt = _txt(rec.get("riepilogo"))
-        if txt:
-            st.markdown("**📋 Riepilogo pre-partita (salvato):**")
-            st.code(txt, language=None)
+        snap = None
+        if rec is not None and "scheda_json" in (rec.index if hasattr(rec, "index") else []):
+            try:
+                snap = json.loads(rec["scheda_json"]) if _txt(rec.get("scheda_json")) else None
+            except Exception:
+                snap = None
+        if snap:
+            won = _pronostico_vinto(snap["best"]["mercato"], gc, gt)
+            esito = "✅ vinto" if won is True else ("❌ perso" if won is False else "—")
+            st.markdown(f"Esito pronostico: **{esito}**")
+            render_scheda_st(snap, home, away)
         else:
-            st.caption("Riepilogo non disponibile per questo pronostico.")
+            st.info("Per questa partita non è stata salvata la scheda pre-partita completa "
+                    "(verrà salvata per i pronostici generati d'ora in avanti). Non la ricalcolo "
+                    "a posteriori perché userebbe dati successivi alla partita.")
         return
 
-    # partita non ancora giocata: analisi dal vivo (come in Analisi & Pronostico)
+    # partita non ancora giocata: analisi dal vivo, scheda completa
     a, home, away, odds = _analizza_row(df, row, comp_df, calibratori=carica_calibrazione())
-    best, p = a["best"], a["prob"]
-    c = st.columns(3)
-    c[0].metric("Pronostico", best["mercato"])
-    c[1].metric("Confidence", f'{best["confidence"]:.0f}/100')
-    c[2].metric("Probabilità", f'{best["prob"]*100:.0f}%')
-    c = st.columns(3)
-    c[0].metric("1", f'{p["1"]*100:.0f}%')
-    c[1].metric("X", f'{p["X"]*100:.0f}%')
-    c[2].metric("2", f'{p["2"]*100:.0f}%')
-    c = st.columns(2)
-    c[0].metric("Over 2.5", f'{a["over_prob"]*100:.0f}%')
-    c[1].metric("Goal", f'{a["btts_prob"]*100:.0f}%')
-    if a.get("alerts"):
-        st.markdown("**🚨 Alert quota:**")
-        for al in a["alerts"]:
-            st.markdown(f"- {al['mercato']}: **{al['livello']}** "
-                        f"(stat {al['prob']*100:.0f}% vs quota {al['market_prob']*100:.0f}%)")
-    st.markdown("**📋 Riepilogo da copiare (note):**")
-    st.code(riepilogo_testo(a, df, home, away, odds, row=row), language=None)
-    st.caption("Per la scheda completa con tutti i mercati e per regolare i pesi, "
-               "usa 🔮 Analisi & Pronostico.")
+    if a.get("errore"):
+        st.warning("Dati storici insufficienti per l'analisi.")
+        return
+    render_scheda_st(a, home, away)
+    st.caption("Per regolare i pesi del modello usa 🔮 Analisi & Pronostico.")
 
 
 def pagina_database(user):
@@ -1356,13 +1530,15 @@ def pagina_database(user):
         lab = label_competizione(cr.get("nome_lungo"), cr.get("nazione")) or _txt(cr.get("nome_corto"))
         if lab:
             opzioni_comp.append(lab)
-    esistenti = [_txt(x) for x in vis.get("competizione", pd.Series(dtype=object)) if _txt(x)]
+    esistenti = [_label_da_comp(x, comp_df)
+                 for x in vis.get("competizione", pd.Series(dtype=object)) if _txt(x)]
     opzioni_comp = sorted(set(opzioni_comp) | set(esistenti))
 
     vista = pd.DataFrame({
         "id": vis["id"],
         "Data": vis["data"],
-        "Competizione": vis.get("competizione"),
+        "Competizione": [_label_da_comp(x, comp_df) for x in vis.get("competizione",
+                         pd.Series([None] * len(vis)))],
         "Casa": vis["squadra_casa"],
         "Trasferta": vis["squadra_trasferta"],
         "Gol Casa": vis["gol_casa"].astype("Int64"),
@@ -1374,7 +1550,7 @@ def pagina_database(user):
 
     edit = st.data_editor(
         vista, use_container_width=True, hide_index=True, key="editor_db",
-        disabled=["id", "Data", "Casa", "Trasferta"],
+        disabled=["id", "Casa", "Trasferta"],
         column_config={
             "id": None,  # nascosta
             "Data": st.column_config.DateColumn(format="DD.MM.YY"),
@@ -1408,7 +1584,10 @@ def pagina_database(user):
             gc0, gt0 = _val(orig.iloc[i]["Gol Casa"]), _val(orig.iloc[i]["Gol Trasferta"])
             comp_new = _txt(edit.iloc[i]["Competizione"]) or None
             comp_old = _txt(orig.iloc[i]["Competizione"]) or None
-            if gc == gc0 and gt == gt0 and comp_new == comp_old:
+            data_new = edit.iloc[i]["Data"]
+            data_old = orig.iloc[i]["Data"]
+            data_cambiata = str(data_new) != str(data_old)
+            if gc == gc0 and gt == gt0 and comp_new == comp_old and not data_cambiata:
                 continue   # riga non modificata: non la tocco (salvataggio istantaneo)
             rec = {"id": edit.iloc[i]["id"], "gol_casa": gc, "gol_trasferta": gt,
                    "aggiornato_il": datetime.utcnow().isoformat()}
@@ -1418,6 +1597,8 @@ def pagina_database(user):
                 rec["competizione"] = comp_new
                 # riallinea la categoria alla nuova competizione
                 rec["tipo_partita"] = categoria_o_nd(comp_new, comp_df)
+            if data_cambiata and data_new is not None and not pd.isna(data_new):
+                rec["data"] = str(data_new)
             records.append(rec)
         try:
             if records:
@@ -2742,6 +2923,7 @@ def pagina_analisi(user):
                     "prob_over25": float(a["over_prob"]), "prob_goal": float(a["btts_prob"]),
                     "prob_1": float(p["1"]), "prob_x": float(p["X"]), "prob_2": float(p["2"]),
                     "riepilogo": testo,
+                    "scheda_json": json.dumps(_snapshot_analisi(a, odds)),
                 })
                 salvati.add(sig)
                 st.caption("💾 Pronostico salvato automaticamente in 📈 Storico pronostici.")
