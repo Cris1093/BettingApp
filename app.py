@@ -908,6 +908,19 @@ def pagina_estrattore(user):
 
     df, team1, team2, quote = parse_incontri(testo)
 
+    # Se il testo incollato cambia (es. incolli prima i risultati e pochi secondi dopo
+    # aggiungi le quote), riallinea i campi quota/forma/rose ai NUOVI valori letti.
+    # Altrimenti Streamlit terrebbe "congelato" il valore comparso la prima volta.
+    _sig = json.dumps(quote, sort_keys=True, default=str)
+    if st.session_state.get("_estr_quote_sig") != _sig:
+        st.session_state["_estr_quote_sig"] = _sig
+        _mappa = {"q1": "1", "qx": "X", "q2": "2", "qo": "over25", "qu": "under25",
+                  "qg": "goal", "qn": "nogoal", "fc": "forma_casa", "ft": "forma_trasferta",
+                  "vc": "val_casa", "vt": "val_trasferta"}
+        for _wk, _qk in _mappa.items():
+            val = quote.get(_qk)
+            st.session_state[_wk] = "" if val in (None, "") else str(val)
+
     if df.empty:
         st.warning("Nessuna partita riconosciuta. Controlla che ci sia la riga 'ULTIMI INCONTRI:'.")
         return
@@ -939,9 +952,9 @@ def pagina_estrattore(user):
         st.markdown("**1X2**")
         st.caption("Quota iniziale (dallo scraper, modificabile)")
         c = st.columns(3)
-        q1 = c[0].text_input("1", str(quote.get("1", "")), key="q1")
-        qx = c[1].text_input("X", str(quote.get("X", "")), key="qx")
-        q2 = c[2].text_input("2", str(quote.get("2", "")), key="q2")
+        q1 = c[0].text_input("1", key="q1")
+        qx = c[1].text_input("X", key="qx")
+        q2 = c[2].text_input("2", key="q2")
         st.caption("Variazione di quota (manuale)")
         c = st.columns(3)
         q1m = c[0].text_input("1 ", "", key="q1m")
@@ -951,8 +964,8 @@ def pagina_estrattore(user):
         st.markdown("**Over / Under 2.5**")
         st.caption("Quota iniziale")
         c = st.columns(2)
-        qo = c[0].text_input("Over 2.5", str(quote.get("over25", "")), key="qo")
-        qu = c[1].text_input("Under 2.5", str(quote.get("under25", "")), key="qu")
+        qo = c[0].text_input("Over 2.5", key="qo")
+        qu = c[1].text_input("Under 2.5", key="qu")
         st.caption("Variazione di quota")
         c = st.columns(2)
         qom = c[0].text_input("Over 2.5 ", "", key="qom")
@@ -961,8 +974,8 @@ def pagina_estrattore(user):
         st.markdown("**Goal / NoGoal**")
         st.caption("Quota iniziale")
         c = st.columns(2)
-        qg = c[0].text_input("Goal", str(quote.get("goal", "")), key="qg")
-        qn = c[1].text_input("NoGoal", str(quote.get("nogoal", "")), key="qn")
+        qg = c[0].text_input("Goal", key="qg")
+        qn = c[1].text_input("NoGoal", key="qn")
         st.caption("Variazione di quota")
         c = st.columns(2)
         qgm = c[0].text_input("Goal ", "", key="qgm")
@@ -970,11 +983,11 @@ def pagina_estrattore(user):
 
         st.markdown("**Forma e valore rose**")
         c = st.columns(2)
-        fc = c[0].text_input(f"Forma {team1 or 'casa'}", str(quote.get("forma_casa", "")), key="fc")
-        ft = c[1].text_input(f"Forma {team2 or 'trasferta'}", str(quote.get("forma_trasferta", "")), key="ft")
+        fc = c[0].text_input(f"Forma {team1 or 'casa'}", key="fc")
+        ft = c[1].text_input(f"Forma {team2 or 'trasferta'}", key="ft")
         c = st.columns(2)
-        vc = c[0].text_input(f"Valore rosa {team1 or 'casa'}", str(quote.get("val_casa", "")), key="vc")
-        vt = c[1].text_input(f"Valore rosa {team2 or 'trasferta'}", str(quote.get("val_trasferta", "")), key="vt")
+        vc = c[0].text_input(f"Valore rosa {team1 or 'casa'}", key="vc")
+        vt = c[1].text_input(f"Valore rosa {team2 or 'trasferta'}", key="vt")
 
     quote_edit = {}
     for k, v in [("1", q1), ("X", qx), ("2", q2),
