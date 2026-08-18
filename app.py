@@ -367,6 +367,22 @@ def aggiorna_partite(records):
     st.cache_data.clear()
 
 
+def elimina_partite(ids):
+    """Elimina le partite indicate e i dati agganciati (pronostici collegati)."""
+    cli = get_client()
+    if not cli:
+        raise RuntimeError("Supabase non configurato.")
+    for mid in ids:
+        if not mid:
+            continue
+        try:
+            cli.table("pronostici").delete().eq("partita_id", str(mid)).execute()
+        except Exception:
+            pass
+        cli.table("partite").delete().eq("id", str(mid)).execute()
+    st.cache_data.clear()
+
+
 # =============================================================================
 #  COMPETIZIONI (categorizzazione)
 # =============================================================================
@@ -489,24 +505,32 @@ def salva_pronostico(record):
 
 def upsert_pronostico(record):
     """Salva/aggiorna il pronostico pre-partita: uno solo per partita. Se la partita
-    ha già un risultato salvato, il pronostico è 'congelato' e non viene sovrascritto."""
+    ha già un risultato salvato, il pronostico è 'congelato' e non viene sovrascritto.
+    Resiliente: se la colonna 'riepilogo' non esiste ancora nel DB, salva senza."""
     cli = get_client()
     if not cli:
         return
-    pid = record.get("partita_id")
-    esistente = None
-    if pid:
-        try:
+
+    def _do(rec):
+        pid = rec.get("partita_id")
+        esistente = None
+        if pid:
             r = cli.table("pronostici").select("id,gol_casa").eq("partita_id", pid).execute()
             esistente = (r.data or [None])[0]
-        except Exception:
-            esistente = None
-    if esistente:
-        if esistente.get("gol_casa") is not None:
-            return  # già completato col risultato: non tocco la foto pre-partita
-        cli.table("pronostici").update(record).eq("id", esistente["id"]).execute()
-    else:
-        cli.table("pronostici").insert(record).execute()
+        if esistente:
+            if esistente.get("gol_casa") is not None:
+                return
+            cli.table("pronostici").update(rec).eq("id", esistente["id"]).execute()
+        else:
+            cli.table("pronostici").insert(rec).execute()
+
+    try:
+        _do(record)
+    except Exception as e:
+        if "riepilogo" in str(e).lower():
+            _do({k: v for k, v in record.items() if k != "riepilogo"})
+        else:
+            raise
     st.cache_data.clear()
 
 
@@ -645,9 +669,22 @@ def _key(s):
     return re.sub(r"\s+", " ", _txt(s)).casefold()
 
 
+def _chiavi_competizione(c):
+    """Tutte le forme con cui una competizione può comparire nello storico:
+    nome corto (SA), nome lungo da solo (Serie A) e nome lungo + nazione
+    (Serie A | ITALIA). Serve ad agganciare la stessa competizione comunque sia scritta."""
+    ks = {
+        _key(c.get("nome_corto")),
+        _key(c.get("nome_lungo")),
+        _key(label_competizione(c.get("nome_lungo"), c.get("nazione"))),
+    }
+    ks.discard("")
+    return ks
+
+
 def categoria_di(codice_o_label, comp_df):
-    """Data una competizione (codice breve OPPURE 'nome | nazione') restituisce la
-    categoria assegnata, se presente e diversa da 'Non assegnata'."""
+    """Data una competizione (codice breve, nome lungo o 'nome | nazione') restituisce
+    la categoria assegnata, se presente e diversa da 'Non assegnata'."""
     if comp_df is None or comp_df.empty or not codice_o_label:
         return None
     k = _key(codice_o_label)
@@ -655,9 +692,7 @@ def categoria_di(codice_o_label, comp_df):
         cat = c.get("categoria")
         if not cat or cat == "Non assegnata":
             continue
-        if _key(c.get("nome_corto")) == k:
-            return cat
-        if _key(label_competizione(c.get("nome_lungo"), c.get("nazione"))) == k:
+        if k in _chiavi_competizione(c):
             return cat
     return None
 
@@ -961,8 +996,12 @@ def pagina_estrattore(user):
 
     # --- salvataggio ---
     salva_target = st.checkbox(
-        f"Salva anche la partita da pronosticare ({team1} - {team2}) con le quote",
-        value=False, disabled=not (team1 and team2))
+        f"Crea anche la partita da pronosticare: {team1} - {team2} (con le quote)",
+        value=True, disabled=not (team1 and team2),
+        help="Oltre allo storico delle due squadre, crea la partita vera e propria che vuoi "
+             "pronosticare, con le quote agganciate. Serve per ritrovarla in 🔮 Analisi e "
+             "tra le partite che segui nel Database. Togli la spunta solo se vuoi salvare "
+             "unicamente lo storico.")
 
     if st.button("💾 Salva nel database", type="primary"):
         if not supabase_pronto():
@@ -1114,6 +1153,7 @@ def pagina_database(user):
         "Trasferta": vis["squadra_trasferta"],
         "Gol Casa": vis["gol_casa"].astype("Int64"),
         "Gol Trasferta": vis["gol_trasferta"].astype("Int64"),
+        "🗑️": [False] * len(vis),
     }).reset_index(drop=True)
     orig = vista.copy()   # per confrontare cosa è cambiato
 
@@ -1125,6 +1165,8 @@ def pagina_database(user):
             "Data": st.column_config.DateColumn(format="DD.MM.YY"),
             "Gol Casa": st.column_config.NumberColumn(min_value=0, step=1),
             "Gol Trasferta": st.column_config.NumberColumn(min_value=0, step=1),
+            "🗑️": st.column_config.CheckboxColumn(
+                "🗑️", help="Spunta le partite da eliminare, poi usa il pulsante 'Elimina'."),
         },
     )
 
@@ -1152,12 +1194,123 @@ def pagina_database(user):
         except Exception as e:
             st.error(f"Errore: {e}")
 
+    # --- eliminazione partite selezionate (col 🗑️) ---
+    da_elim = edit[edit["🗑️"] == True] if "🗑️" in edit else edit.iloc[0:0]
+    if len(da_elim):
+        st.divider()
+        st.warning(f"{len(da_elim)} partite selezionate per l'eliminazione:")
+        for _, rr in da_elim.iterrows():
+            st.markdown(f"- {rr['Casa']} - {rr['Trasferta']} ({rr['Data']})")
+        conf = st.checkbox("Confermo: elimina definitivamente queste partite e i dati agganciati "
+                           "(pronostici collegati)")
+        if st.button("🗑️ Elimina selezionate", type="secondary"):
+            if not conf:
+                st.warning("Spunta la conferma prima di eliminare.")
+            else:
+                try:
+                    elimina_partite([rr["id"] for _, rr in da_elim.iterrows()])
+                    st.success(f"Eliminate {len(da_elim)} partite.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Errore: {e}")
+
     col2.download_button(
         "⬇️ Esporta partite (Excel)",
         data=to_excel({"partite": partite_per_export(df)}),
         file_name="partite.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+    # --- editor quote / valori rose di una partita ---
+    st.divider()
+    st.subheader("✏️ Quote e valori di una partita")
+    st.caption("Inserisci o correggi le quote (anche variazioni) e i valori rosa. "
+               "Aggiungere le quote rende la partita pronosticabile in 🔮 Analisi.")
+    fx = df.copy()
+    cond = pd.Series(False, index=fx.index)
+    if "is_target" in fx:
+        cond = cond | (fx["is_target"] == True)
+    if "da_compilare" in fx:
+        cond = cond | (fx["da_compilare"] == True)
+    fx = fx[cond] if cond.any() else fx
+    if "data" in fx:
+        fx = fx.sort_values("data", ascending=False)
+    opz_q = {}
+    for _, r in fx.iterrows():
+        d = r["data"].strftime("%d.%m.%y") if hasattr(r["data"], "strftime") else r["data"]
+        opz_q[f'{d} · {r["squadra_casa"]} - {r["squadra_trasferta"]}'] = r["id"]
+    if not opz_q:
+        st.caption("Nessuna partita da pronosticare o pianificata. Aggiungine una dall'estrattore "
+                   "o dalla pianificazione.")
+    else:
+        sel_q = st.selectbox("Partita", ["—"] + list(opz_q.keys()), key="quote_sel")
+        if sel_q != "—":
+            mid = opz_q[sel_q]
+            rr = df[df["id"] == mid].iloc[0]
+
+            def _n(col):
+                v = rr.get(col)
+                return None if (v is None or pd.isna(v)) else float(v)
+
+            def _in(label, col, key):
+                return st.number_input(label, value=_n(col), step=0.01, format="%.2f",
+                                       key=f"qe_{key}")
+
+            st.markdown("**1X2** — quota iniziale e variazione (la variazione può essere negativa)")
+            c = st.columns(3)
+            with c[0]:
+                q1 = _in("1", "quota_iniziale_1", "1")
+                v1 = _in("Var. 1", "variazione_quota_1", "v1")
+            with c[1]:
+                qx = _in("X", "quota_iniziale_x", "x")
+                vx = _in("Var. X", "variazione_quota_x", "vx")
+            with c[2]:
+                q2 = _in("2", "quota_iniziale_2", "2")
+                v2 = _in("Var. 2", "variazione_quota_2", "v2")
+
+            st.markdown("**Over/Under 2.5** e **Goal/No Goal**")
+            c = st.columns(4)
+            with c[0]:
+                qov = _in("Over 2.5", "quota_iniziale_over", "ov")
+                vov = _in("Var. Over", "variazione_quota_over", "vov")
+            with c[1]:
+                qun = _in("Under 2.5", "quota_iniziale_under", "un")
+                vun = _in("Var. Under", "variazione_quota_under", "vun")
+            with c[2]:
+                qgo = _in("Goal", "quota_iniziale_goal", "go")
+                vgo = _in("Var. Goal", "variazione_quota_goal", "vgo")
+            with c[3]:
+                qng = _in("No Goal", "quota_iniziale_nogoal", "ng")
+                vng = _in("Var. NoGoal", "variazione_quota_nogoal", "vng")
+
+            st.markdown("**Valori rosa** (opzionali: mitigano il livello di lega)")
+            c = st.columns(2)
+            with c[0]:
+                vcasa = _in("Valore rosa casa", "val_casa", "vc")
+            with c[1]:
+                vtras = _in("Valore rosa trasferta", "val_trasferta", "vt")
+
+            if st.button("💾 Salva quote/valori", type="primary", key="save_quote"):
+                payload = {
+                    "quota_iniziale_1": q1, "quota_iniziale_x": qx, "quota_iniziale_2": q2,
+                    "variazione_quota_1": v1, "variazione_quota_x": vx, "variazione_quota_2": v2,
+                    "quota_iniziale_over": qov, "quota_iniziale_under": qun,
+                    "variazione_quota_over": vov, "variazione_quota_under": vun,
+                    "quota_iniziale_goal": qgo, "quota_iniziale_nogoal": qng,
+                    "variazione_quota_goal": vgo, "variazione_quota_nogoal": vng,
+                    "val_casa": vcasa, "val_trasferta": vtras,
+                    "aggiornato_il": datetime.utcnow().isoformat(),
+                }
+                # se ci sono quote, la partita diventa pronosticabile ed esce da "da compilare"
+                if any(x is not None for x in (q1, qx, q2, qov, qun, qgo, qng)):
+                    payload["is_target"] = True
+                    payload["da_compilare"] = False
+                try:
+                    aggiorna_partite([{"id": mid, **payload}])
+                    st.success("Quote/valori salvati. La partita è ora pronosticabile in 🔮 Analisi.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Errore: {e}")
 
     # --- dettaglio grafico ---
     st.subheader("🔎 Dettaglio partita")
@@ -1396,8 +1549,21 @@ def pagina_estrattore_pianificazione(user):
         cc = st.columns(2)
         m_casa = cc[0].text_input("Squadra casa", key="man_casa")
         m_trasf = cc[1].text_input("Squadra trasferta", key="man_trasf")
-        m_comp = st.text_input("Competizione (opzionale)", key="man_comp",
-                               placeholder="es. Serie A")
+        # menu a tendina delle competizioni a sistema
+        comp_df = carica_competizioni()
+        opzioni = {"— nessuna —": None}
+        if not comp_df.empty:
+            for _, cr in comp_df.sort_values("nome_lungo", na_position="last").iterrows():
+                lab = label_competizione(cr.get("nome_lungo"), cr.get("nazione")) \
+                    or _txt(cr.get("nome_corto"))
+                codice = _txt(cr.get("nome_corto")) or lab
+                if lab:
+                    opzioni[lab] = codice
+        m_comp_lab = st.selectbox(
+            "Competizione", list(opzioni.keys()), key="man_comp",
+            help="Scegli tra le competizioni già a sistema (Configurazione). "
+                 "Se manca, aggiungila prima in Configurazione.")
+        m_comp = opzioni.get(m_comp_lab)
         if st.button("Aggiungi partita", key="man_btn"):
             if not m_data or not m_casa.strip() or not m_trasf.strip():
                 st.warning("Servono almeno data, squadra casa e squadra trasferta.")
@@ -1406,7 +1572,7 @@ def pagina_estrattore_pianificazione(user):
                     salva_partite([{
                         "data": str(m_data), "ora": m_ora.strip() or None,
                         "squadra_casa": m_casa.strip(), "squadra_trasferta": m_trasf.strip(),
-                        "competizione": m_comp.strip() or None,
+                        "competizione": m_comp,
                         "tipo_partita": "ND", "da_compilare": True,
                         "inserito_da": user["username"],
                         "aggiornato_il": datetime.utcnow().isoformat(),
@@ -1829,8 +1995,7 @@ def pagina_configurazione(user):
         gia_noti = set()
         if not comp_df.empty:
             for _, c in comp_df.iterrows():
-                gia_noti.add(_key(c.get("nome_corto")))
-                gia_noti.add(_key(label_competizione(c.get("nome_lungo"), c.get("nazione"))))
+                gia_noti |= _chiavi_competizione(c)
         mancanti = [c for c in codici if _key(c) not in gia_noti]
         if mancanti:
             st.caption("Codici trovati nello storico non ancora in anagrafica: "
@@ -2094,10 +2259,8 @@ def pagina_analisi(user):
                 continue
             if liv is None or (isinstance(liv, float) and liv != liv):
                 continue
-            for kk in (cc.get("nome_corto"),
-                       label_competizione(cc.get("nome_lungo"), cc.get("nazione"))):
-                if kk:
-                    livelli[_key(kk)] = int(liv)
+            for kk in _chiavi_competizione(cc):
+                livelli[kk] = int(liv)
     rose = None
     tipo_target = None
     variazioni = None
@@ -2275,9 +2438,11 @@ def pagina_analisi(user):
                     "riepilogo": testo,
                 })
                 salvati.add(sig)
-            except Exception:
-                pass  # il salvataggio non deve mai bloccare l'analisi
-        st.caption("💾 Pronostico salvato automaticamente in 📈 Storico pronostici.")
+                st.caption("💾 Pronostico salvato automaticamente in 📈 Storico pronostici.")
+            except Exception as e:
+                st.warning(f"Salvataggio automatico non riuscito: {e}")
+        else:
+            st.caption("💾 Pronostico salvato automaticamente in 📈 Storico pronostici.")
 
     # --- riepilogo da copiare (per studio / note) ---
     with st.expander("📋 Riepilogo da copiare (note)"):
@@ -2460,23 +2625,28 @@ def pagina_storico_pronostici(user):
     if aperti:
         st.caption(f"{aperti} in attesa di risultato.")
 
-    st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
+    tab = pd.DataFrame(righe)
+    st.caption("Clicca una riga per aprire il 📋 riepilogo pre-partita.")
+    sel = st.dataframe(tab, use_container_width=True, hide_index=True,
+                       on_select="rerun", selection_mode="single-row")
+
+    # riepilogo della riga selezionata
+    idxs = []
+    try:
+        idxs = sel.selection.rows
+    except Exception:
+        idxs = []
+    if idxs:
+        r = pron.iloc[idxs[0]]
+        st.subheader("📋 Riepilogo da copiare (note)")
+        txt = _txt(r.get("riepilogo")) if "riepilogo" in pron.columns else ""
+        if txt:
+            st.code(txt, language=None)
+        else:
+            st.info("Per questo pronostico non è stato salvato il riepilogo "
+                    "(verrà salvato per i pronostici generati d'ora in avanti).")
     st.caption("Nota: la percentuale di riuscita è indicativa finché i numeri sono piccoli. "
                "Serve tempo e volume per trarne conclusioni.")
-
-    # --- riepilogo pre-partita salvato ---
-    if "riepilogo" in pron.columns:
-        st.subheader("📋 Riepilogo da copiare (note)")
-        opz = {}
-        for _, r in pron.iterrows():
-            if _txt(r.get("riepilogo")):
-                lab = f'{r.get("squadra_casa")} - {r.get("squadra_trasferta")} ({r.get("data")})'
-                opz[lab] = r["riepilogo"]
-        if opz:
-            scelta = st.selectbox("Scegli una partita", list(opz.keys()))
-            st.code(opz[scelta], language=None)
-        else:
-            st.caption("I riepiloghi compaiono qui per i pronostici generati d'ora in avanti.")
 
 
 def main():
