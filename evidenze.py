@@ -60,6 +60,7 @@ def _blocco(partite):
     gf = gs = 0
     over = {ln: 0 for ln in (0.5, 1.5, 2.5, 3.5, 4.5, 5.5)}
     goal = nogoal = clean = nosegna = 0
+    almeno1_fatto = almeno1_subito = 0
     dist = {}                      # distribuzione gol TOTALI
     dist_team = {}                 # distribuzione gol della squadra
     for p in partite:
@@ -84,6 +85,10 @@ def _blocco(partite):
             clean += 1
         if f == 0:
             nosegna += 1
+        if f >= 1:
+            almeno1_fatto += 1
+        if a >= 1:
+            almeno1_subito += 1
         dist[tot] = dist.get(tot, 0) + 1
         dist_team[f] = dist_team.get(f, 0) + 1
     return {
@@ -93,6 +98,8 @@ def _blocco(partite):
         "under25": {"n": n - over[2.5], "pct": _r2(_pct(n - over[2.5], n))},
         "goal": {"n": goal, "pct": _r2(_pct(goal, n))},
         "nogoal": {"n": nogoal, "pct": _r2(_pct(nogoal, n))},
+        "almeno1_fatto": {"n": almeno1_fatto, "pct": _r2(_pct(almeno1_fatto, n))},
+        "almeno1_subito": {"n": almeno1_subito, "pct": _r2(_pct(almeno1_subito, n))},
         "clean": {"n": clean, "pct": _r2(_pct(clean, n))},
         "nosegna": {"n": nosegna, "pct": _r2(_pct(nosegna, n))},
         "vitt": {"n": v, "pct": _r2(_pct(v, n))},

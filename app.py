@@ -1368,7 +1368,8 @@ def genera_docx_nuova_analisi(df, comp_df):
         doc.add_heading("Analisi ragionata", level=2)
         racc = analisi_ragionata(df, home, away, data_partita=row.get("data"),
                                  odds=odds, variazioni=_variazioni_da_row(row),
-                                 escludi_id=row.get("id"))
+                                 escludi_id=row.get("id"),
+                                 competizione=_label_da_comp(row.get("competizione"), comp_df))
         if not racc:
             doc.add_paragraph("Storico insufficiente per l'analisi.")
         else:
@@ -2751,7 +2752,7 @@ def _partite_squadra_evidenze(df, team, prima_di=None, escludi_id=None):
     return out
 
 
-def analisi_ragionata(df, home, away, data_partita=None, odds=None, variazioni=None, escludi_id=None):
+def analisi_ragionata(df, home, away, data_partita=None, odds=None, variazioni=None, escludi_id=None, competizione=None):
     """Ponte verso il nuovo motore: evidenze -> signal score -> racconto.
     Ritorna il dict del racconto, oppure None se manca lo storico."""
     ph = _partite_squadra_evidenze(df, home, data_partita, escludi_id)
@@ -2760,7 +2761,7 @@ def analisi_ragionata(df, home, away, data_partita=None, odds=None, variazioni=N
         return None
     ev = evidenze.costruisci_evidenze(ph, pa, odds=odds, variazioni=variazioni)
     sig = segnali.calcola_signal(ev)
-    return racconto.racconta(home, away, ev, sig)
+    return racconto.racconta(home, away, ev, sig, competizione=competizione)
 
 
 def render_racconto_st(racc):
@@ -2957,9 +2958,12 @@ def pagina_analisi(user):
 
     # === NUOVA ANALISI RAGIONATA (evidenze + signal score + racconto) ===
     st.subheader("🧠 Analisi ragionata")
+    comp_target = (_label_da_comp(row.get("competizione"), carica_competizioni())
+                   if not pend.empty else None)
     racc = analisi_ragionata(df, home, away, data_partita=data_partita,
                              odds=odds, variazioni=variazioni,
-                             escludi_id=(row.get("id") if not pend.empty else None))
+                             escludi_id=(row.get("id") if not pend.empty else None),
+                             competizione=comp_target)
     render_racconto_st(racc)
 
     st.divider()

@@ -274,14 +274,90 @@ def _pronostico(signal, ev):
 
 
 # ------------------------------------------------------------------------ entry
-def racconta(home_name, away_name, ev, signal):
-    sezioni = [
+def _distribuzione_gol(home_name, away_name, ev):
+    """Mostra quante volte ciascuna squadra ha fatto/subito esattamente N gol."""
+    def riga(nome, sq):
+        dfs = sq.get("dist_fs", {})
+        if not dfs:
+            return None
+        fatti = dfs.get("fatti", {})
+        subiti = dfs.get("subiti", {})
+        ff = ", ".join(f"{g} gol {v['pct']:.0f}%" for g, v in list(fatti.items())[:5])
+        ss = ", ".join(f"{g} gol {v['pct']:.0f}%" for g, v in list(subiti.items())[:5])
+        return f"{nome} — fatti: {ff or 'n/d'}; subiti: {ss or 'n/d'}."
+    righe = [r for r in (riga(home_name, ev["home"]), riga(away_name, ev["away"])) if r]
+    return {"titolo": "Distribuzione gol (fatti / subiti)", "righe": righe} if righe else None
+
+
+def _ragionamento_gol(home_name, away_name, ev):
+    """Ragionamento CONCATENATO che porta a una banda di gol attesa."""
+    h, a = ev["home"]["generale"], ev["away"]["generale"]
+    prob = ev["prob"]
+    passi = []
+    hf = h.get("almeno1_fatto", {}).get("pct", 0)
+    hs = h.get("almeno1_subito", {}).get("pct", 0)
+    if hf >= 90 or hs >= 90:
+        verbo = "segnato" if hf >= 90 else "subito"
+        passi.append(f"{home_name} ha {verbo} almeno 1 gol in quasi tutte le partite "
+                     f"({max(hf, hs):.0f}%): l'Over 0.5 è quasi scontato.")
+    dom_h = max(h["dist_tot"].items(), key=lambda x: x[1]["pct"]) if h.get("dist_tot") else None
+    dom_a = max(a["dist_tot"].items(), key=lambda x: x[1]["pct"]) if a.get("dist_tot") else None
+    if dom_h and dom_a:
+        passi.append(f"Il risultato-somma più frequente è {dom_h[0]} gol per {home_name} "
+                     f"({dom_h[1]['pct']:.0f}%) e {dom_a[0]} gol per {away_name} ({dom_a[1]['pct']:.0f}%).")
+    under = prob.get("Under 2.5")
+    nogoal = prob.get("No Goal")
+    tende_chiuso = (under is not None and under >= 55) or (nogoal is not None and nogoal >= 55)
+    if dom_h and dom_a:
+        base, alto = min(dom_h[0], dom_a[0]), max(dom_h[0], dom_a[0])
+        if tende_chiuso:
+            base_b = max(1, base)
+            alto_b = min(2, base_b + 1) if base_b <= 1 else max(base_b, alto)
+            passi.append(f"Poiché la partita tende al chiuso (Under {under:.0f}% / No Goal "
+                         f"{nogoal:.0f}%), la banda più probabile è di {base_b}–{alto_b} "
+                         "gol totali.")
+        else:
+            passi.append(f"Con tendenza aperta (Over prevalente), è probabile superare i "
+                         f"{base} gol totali.")
+    return {"titolo": "Ragionamento sui gol", "righe": passi} if passi else None
+
+
+def _contesto_coppa(competizione):
+    """Nota di cautela per coppe internazionali: forte in patria ≠ forte in Europa."""
+    if not competizione:
+        return None
+    c = str(competizione).lower()
+    internaz = any(k in c for k in ("champions", "europa", "conference", "coppa",
+                                    "libertadores", "sudamericana", "cup", "uefa", "europe"))
+    if not internaz:
+        return None
+    return {"titolo": "⚠️ Contesto competizione",
+            "righe": ["Competizione internazionale/coppa: una squadra può dominare nel proprio "
+                      "campionato ma essere modesta contro leghe più forti. I dati casa/trasferta "
+                      "vanno letti con prudenza: gli avversari possono avere un livello molto "
+                      "diverso dal solito."]}
+
+
+def racconta(home_name, away_name, ev, signal, competizione=None):
+    sezioni = []
+    coppa = _contesto_coppa(competizione)
+    if coppa:
+        sezioni.append(coppa)
+    sezioni.extend([
         _sintesi(home_name, away_name, ev),
         _forma_generale(home_name, away_name, ev),
+    ])
+    dist = _distribuzione_gol(home_name, away_name, ev)
+    if dist:
+        sezioni.append(dist)
+    sezioni.extend([
         _casa_trasferta(home_name, away_name, ev),
         _convergenze(ev),
         _eventi_rari(home_name, away_name, ev),
-    ]
+    ])
+    rag = _ragionamento_gol(home_name, away_name, ev)
+    if rag:
+        sezioni.append(rag)
     serie = _serie_attive(home_name, away_name, ev)
     if serie:
         sezioni.append(serie)
