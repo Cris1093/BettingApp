@@ -253,7 +253,9 @@ def _risultati_esatti(home_name, away_name, ev, signal):
 def _pronostico(signal, ev):
     if not signal:
         return {"testo": "Dati insufficienti per un pronostico.", "mercato": None, "score": 0}
-    top = signal[0]
+    # il "12" (no pareggio) è sicuro ma non è un titolo sensato: non lo si headline
+    candidati = [m for m in signal if m["mercato"] != "12"]
+    top = candidati[0] if candidati else signal[0]
     # regola d'oro: se nessun mercato è forte, dillo
     if top["score"] < 45:
         return {"testo": "Nessun mercato presenta un supporto statistico sufficiente: "

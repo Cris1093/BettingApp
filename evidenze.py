@@ -246,16 +246,125 @@ def analizza_quote(odds, variazioni=None):
 
 
 # ------------------------------------------------------------------------- entry
+def _dist_fatti_subiti(partite):
+    """Distribuzione di quante volte la squadra ha FATTO esattamente N gol e
+    SUBITO esattamente N gol (punto 1 delle annotazioni)."""
+    n = len(partite)
+    fatti, subiti = {}, {}
+    for p in partite:
+        f, s = int(p["gf"]), int(p["gs"])
+        fatti[f] = fatti.get(f, 0) + 1
+        subiti[s] = subiti.get(s, 0) + 1
+    return {
+        "fatti": {k: {"n": c, "pct": _r2(_pct(c, n))} for k, c in sorted(fatti.items())},
+        "subiti": {k: {"n": c, "pct": _r2(_pct(c, n))} for k, c in sorted(subiti.items())},
+    }
+
+
+def _prob_pesata(home, away, chiave, sub=None):
+    """Probabilità di un mercato-gol combinando i 4 campioni con pesi (casa/trasferta
+    pesa più del generale). Ritorna una % coerente e leggibile."""
+    def v(blocco):
+        if not blocco or blocco.get("n", 0) == 0:
+            return None
+        x = blocco.get(chiave)
+        return (x[sub]["pct"] if sub else x["pct"]) if x else None
+    # pesi: split (casa/trasf) 0.40, generale 0.30, recenti5 0.30 — mediati fra le due squadre
+    comp = []
+    for sq in (home, away):
+        parti = [(v(sq["split"]), 0.40), (v(sq["generale"]), 0.30), (v(sq["recenti5"]), 0.30)]
+        num = sum(w * val for val, w in parti if val is not None)
+        den = sum(w for val, w in parti if val is not None)
+        if den:
+            comp.append(num / den)
+    return _r2(sum(comp) / len(comp)) if comp else None
+
+
+def probabilita_coerenti(home, away):
+    """Probabilità COERENTI dei mercati: Over+Under=100, Goal+NoGoal=100, 1+X+2=100.
+    Base per il Signal Score. Tutto da frequenze pesate, niente stime arbitrarie."""
+    over = _prob_pesata(home, away, "over", 2.5)
+    goal = _prob_pesata(home, away, "goal")
+    out = {}
+    if over is not None:
+        out["Over 2.5"] = over
+        out["Under 2.5"] = _r2(100 - over)
+    if goal is not None:
+        out["Goal"] = goal
+        out["No Goal"] = _r2(100 - goal)
+    # 1X2: forza relativa normalizzata a 100, con vantaggio casa e freno coppe
+    p1, px, p2 = _prob_1x2(home, away)
+    out["1"], out["X"], out["2"] = p1, px, p2
+    out["1X"] = _r2(min(100, p1 + px))
+    out["X2"] = _r2(min(100, px + p2))
+    out["12"] = _r2(min(100, p1 + p2))
+    return out
+
+
+def _forza(blocco_gen, blocco_split, blocco_rec):
+    """Indice di rendimento 0..1 di una squadra (vittorie + mezzo pareggio), pesato."""
+    def wr(b):
+        if not b or b.get("n", 0) == 0:
+            return None
+        return (b["v"] + 0.4 * b["d"]) / b["n"]
+    parti = [(wr(blocco_split), 0.45), (wr(blocco_gen), 0.30), (wr(blocco_rec), 0.25)]
+    num = sum(w * v for v, w in parti if v is not None)
+    den = sum(w for v, w in parti if v is not None)
+    return (num / den) if den else 0.5
+
+
+def _prob_1x2(home, away):
+    """Probabilità 1/X/2 COERENTI (sommano a 100), con la logica richiesta:
+    - se la CASA non perde quasi mai in casa -> la X e il 2 si comprimono (1X sicuro)
+    - se l'OSPITE perde molto in trasferta -> l'1 sale davvero
+    - se l'ospite è forte fuori -> l'1 resta prudente (non gonfiato)."""
+    fh = _forza(home["generale"], home["split"], home["recenti5"])
+    fa = _forza(away["generale"], away["split"], away["recenti5"])
+    sh = fh + 0.12          # vantaggio campo
+    sa = fa
+    # attenuazione base verso la media, per non gonfiare il favorito
+    m = (sh + sa) / 2
+    sh = m + (sh - m) * 0.65
+    sa = m + (sa - m) * 0.65
+
+    hs, aw = home["split"], away["split"]
+    # tasso sconfitte casa dell'ospite (in trasferta) e della casa (in casa)
+    perde_casa = (hs["sconf"]["pct"] / 100.0) if hs.get("n", 0) >= 4 else 0.5
+    perde_osp = (aw["sconf"]["pct"] / 100.0) if aw.get("n", 0) >= 4 else 0.5
+
+    # 1) la casa non perde quasi mai in casa -> comprime il 2 (rete di sicurezza 1X)
+    if hs.get("n", 0) >= 4 and perde_casa <= 0.15:
+        sa *= 0.75          # l'ospite fatica a vincere qui
+    # 2) l'ospite perde molto in trasferta -> spinge l'1
+    if aw.get("n", 0) >= 4 and perde_osp >= 0.45:
+        sh *= 1.18
+    # 3) l'ospite è forte fuori (poche sconfitte) -> l'1 resta prudente
+    elif aw.get("n", 0) >= 4 and perde_osp <= 0.25:
+        sh *= 0.92
+
+    diff = abs(sh - sa)
+    x = max(0.14, 0.34 - 0.9 * diff)
+    resto = 1 - x
+    tot = sh + sa if (sh + sa) > 0 else 1
+    p1 = resto * (sh / tot)
+    p2 = resto * (sa / tot)
+    s = p1 + x + p2
+    return _r2(p1 / s * 100), _r2(x / s * 100), _r2(p2 / s * 100)
+
+
 def costruisci_evidenze(partite_home, partite_away, odds=None, variazioni=None):
     """Punto d'ingresso: costruisce l'intero quadro di evidenze per la partita."""
     home = analizza_squadra(partite_home, "casa")
     away = analizza_squadra(partite_away, "trasf")
+    home["dist_fs"] = _dist_fatti_subiti(partite_home)
+    away["dist_fs"] = _dist_fatti_subiti(partite_away)
     return {
         "home": home,
         "away": away,
         "convergenze": convergenze(home, away),
         "contraddizioni": contraddizioni(home, "Casa") + contraddizioni(away, "Trasferta"),
         "quote": analizza_quote(odds, variazioni),
+        "prob": probabilita_coerenti(home, away),
         "n_home": home["generale"].get("n", 0),
         "n_away": away["generale"].get("n", 0),
     }
