@@ -1215,10 +1215,10 @@ def genera_docx_archivio(df, comp_df, con_analisi=True):
             doc.add_paragraph().add_run("    ".join(meta_parts)).italic = True
 
         doc.add_heading(f"Ultime partite {home}", level=2)
-        for r in _ultime_partite_testo(df, home):
+        for r in _ultime_partite_testo(df, home, escludi_id=row.get("id")):
             doc.add_paragraph(r, style="List Bullet")
         doc.add_heading(f"Ultime partite {away}", level=2)
-        for r in _ultime_partite_testo(df, away):
+        for r in _ultime_partite_testo(df, away, escludi_id=row.get("id")):
             doc.add_paragraph(r, style="List Bullet")
 
         # snapshot analisi salvato (per quote + mercati completi)
@@ -1349,10 +1349,10 @@ def genera_docx_nuova_analisi(df, comp_df):
             doc.add_paragraph().add_run("    ".join(meta)).italic = True
 
         doc.add_heading(f"Ultime partite {home}", level=2)
-        for r in _ultime_partite_testo(df, home):
+        for r in _ultime_partite_testo(df, home, escludi_id=row.get("id")):
             doc.add_paragraph(r, style="List Bullet")
         doc.add_heading(f"Ultime partite {away}", level=2)
-        for r in _ultime_partite_testo(df, away):
+        for r in _ultime_partite_testo(df, away, escludi_id=row.get("id")):
             doc.add_paragraph(r, style="List Bullet")
 
         odds = _eff_odds(row)
@@ -1367,7 +1367,8 @@ def genera_docx_nuova_analisi(df, comp_df):
         # analisi ragionata (pre-partita, filtrata per data)
         doc.add_heading("Analisi ragionata", level=2)
         racc = analisi_ragionata(df, home, away, data_partita=row.get("data"),
-                                 odds=odds, variazioni=_variazioni_da_row(row))
+                                 odds=odds, variazioni=_variazioni_da_row(row),
+                                 escludi_id=row.get("id"))
         if not racc:
             doc.add_paragraph("Storico insufficiente per l'analisi.")
         else:
@@ -2723,14 +2724,17 @@ def _col_conf(v):  # v in 0..100
     return COL["win"] if v >= 65 else (COL["draw"] if v >= 45 else COL["loss"])
 
 
-def _partite_squadra_evidenze(df, team, prima_di=None):
+def _partite_squadra_evidenze(df, team, prima_di=None, escludi_id=None):
     """Estrae le partite giocate di una squadra nel formato del nuovo motore
     (gf/gs dal suo punto di vista, casa True/False), dalla più recente. Filtra per
-    data < prima_di così l'analisi resta 'pre-partita' anche a match concluso."""
+    data < prima_di e ESCLUDE la fixture stessa (escludi_id) così l'analisi resta
+    davvero 'pre-partita' anche a match concluso."""
     if df.empty:
         return []
     d = df[(df["squadra_casa"] == team) | (df["squadra_trasferta"] == team)]
     d = d[d["gol_casa"].notna() & d["gol_trasferta"].notna()]
+    if escludi_id is not None and "id" in d.columns:
+        d = d[d["id"] != escludi_id]
     if prima_di is not None and "data" in d.columns:
         try:
             d = d[d["data"] < prima_di]
@@ -2747,11 +2751,11 @@ def _partite_squadra_evidenze(df, team, prima_di=None):
     return out
 
 
-def analisi_ragionata(df, home, away, data_partita=None, odds=None, variazioni=None):
+def analisi_ragionata(df, home, away, data_partita=None, odds=None, variazioni=None, escludi_id=None):
     """Ponte verso il nuovo motore: evidenze -> signal score -> racconto.
     Ritorna il dict del racconto, oppure None se manca lo storico."""
-    ph = _partite_squadra_evidenze(df, home, data_partita)
-    pa = _partite_squadra_evidenze(df, away, data_partita)
+    ph = _partite_squadra_evidenze(df, home, data_partita, escludi_id)
+    pa = _partite_squadra_evidenze(df, away, data_partita, escludi_id)
     if not ph or not pa:
         return None
     ev = evidenze.costruisci_evidenze(ph, pa, odds=odds, variazioni=variazioni)
@@ -2780,12 +2784,14 @@ def render_racconto_st(racc):
                 st.markdown(f"- {r}")
 
 
-def _ultime_partite_testo(df, team, n=15):
+def _ultime_partite_testo(df, team, n=15, escludi_id=None):
     """Righe di testo con le ultime partite giocate di una squadra."""
     if df.empty:
         return []
     d = df[((df["squadra_casa"] == team) | (df["squadra_trasferta"] == team))]
     d = d[d["gol_casa"].notna() & d["gol_trasferta"].notna()]
+    if escludi_id is not None and "id" in d.columns:
+        d = d[d["id"] != escludi_id]
     if "data" in d.columns:
         d = d.sort_values("data", ascending=False)
     out = []
@@ -2843,7 +2849,8 @@ def riepilogo_testo(a, df, home, away, odds, row=None):
             L.append(f"  - {al['mercato']}: {al['livello']} (stat {al['prob']*100:.0f}% "
                      f"vs quota {al['market_prob']*100:.0f}%)")
     for team in (home, away):
-        righe = _ultime_partite_testo(df, team)
+        righe = _ultime_partite_testo(df, team,
+                                      escludi_id=(row.get("id") if row is not None else None))
         if righe:
             L.append("")
             L.append(f"ULTIME PARTITE {team.upper()}:")
@@ -2951,7 +2958,8 @@ def pagina_analisi(user):
     # === NUOVA ANALISI RAGIONATA (evidenze + signal score + racconto) ===
     st.subheader("🧠 Analisi ragionata")
     racc = analisi_ragionata(df, home, away, data_partita=data_partita,
-                             odds=odds, variazioni=variazioni)
+                             odds=odds, variazioni=variazioni,
+                             escludi_id=(row.get("id") if not pend.empty else None))
     render_racconto_st(racc)
 
     st.divider()
