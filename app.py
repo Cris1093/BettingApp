@@ -20,6 +20,9 @@ from datetime import date, datetime
 from difflib import SequenceMatcher
 
 import analisi
+import evidenze
+import segnali
+import racconto
 
 import pandas as pd
 import streamlit as st
@@ -239,6 +242,21 @@ def parse_incontri(testo):
 
     team1 = headers[0][1] if len(headers) >= 1 else None
     team2 = headers[1][1] if len(headers) >= 2 else None
+
+    # L'intestazione può avere una forma diversa (es. TUTTA MAIUSCOLA) rispetto ai nomi
+    # nelle partite: riporto team1/team2 esattamente alla forma usata nello storico,
+    # altrimenti il motore non trova le partite della squadra ("storico insufficiente").
+    if not df.empty:
+        nomi = set(df["casa"]) | set(df["trasferta"])
+        def _risolvi(nome):
+            if not nome:
+                return nome
+            for n in nomi:
+                if _key(n) == _key(nome):
+                    return n
+            return nome
+        team1, team2 = _risolvi(team1), _risolvi(team2)
+
     return df, team1, team2, quote
 
 
@@ -542,12 +560,13 @@ def upsert_pronostico(record):
 
     try:
         _do(record)
-    except Exception as e:
-        msg = str(e).lower()
-        if "riepilogo" in msg or "scheda_json" in msg or "column" in msg:
-            _do({k: v for k, v in record.items() if k not in ("riepilogo", "scheda_json")})
-        else:
-            raise
+    except Exception:
+        # fallback progressivo: togli prima solo scheda_json, poi anche riepilogo,
+        # così non si perde il riepilogo quando manca solo la colonna scheda_json
+        try:
+            _do({k: v for k, v in record.items() if k != "scheda_json"})
+        except Exception:
+            _do({k: v for k, v in record.items() if k not in ("scheda_json", "riepilogo")})
     st.cache_data.clear()
 
 
@@ -930,6 +949,21 @@ def pagina_estrattore(user):
     st.header("📥 Ultimi risultati e quote")
     st.caption("Incolla i blocchi 'ULTIMI INCONTRI' di 2 squadre alla volta, poi rivedi e salva.")
 
+    # Prima informazione (opzionale): competizione/tipo della partita da pronosticare
+    comp_df_estr = carica_competizioni()
+    opz_estr = {"— non specificata —": None}
+    if not comp_df_estr.empty:
+        for _, cr in comp_df_estr.sort_values("nome_lungo", na_position="last").iterrows():
+            lab = label_competizione(cr.get("nome_lungo"), cr.get("nazione")) or _txt(cr.get("nome_corto"))
+            if lab:
+                opz_estr[lab] = _txt(cr.get("nome_corto")) or lab
+    comp_target_lab = st.selectbox(
+        "Competizione della partita da pronosticare (opzionale)", list(opz_estr.keys()),
+        key="estr_comp_target",
+        help="Campionato, coppa o amichevole della partita che vuoi pronosticare. "
+             "Determina categoria e livello usati dal motore. Puoi lasciarla non specificata.")
+    comp_target = opz_estr.get(comp_target_lab)
+
     testo = st.text_area("Incolla qui il testo", height=260, key="testo_estrattore")
 
     if not testo.strip():
@@ -1098,6 +1132,10 @@ def pagina_estrattore(user):
                 "inserito_da": user["username"],
                 "aggiornato_il": datetime.utcnow().isoformat(),
             }
+            # competizione scelta in alto (opzionale): imposta anche la categoria
+            if comp_target:
+                payload["competizione"] = comp_target
+                payload["tipo_partita"] = categoria_o_nd(comp_target, comp_df_estr)
             # cerca una riga pianificata/pending con le stesse squadre (per non duplicare)
             part_now = carica_partite()
             esistente = None
@@ -1265,6 +1303,79 @@ def genera_docx_archivio(df, comp_df, con_analisi=True):
                 doc.add_paragraph("Nessuna scheda pre-partita salvata per questa partita.")
             else:
                 doc.add_paragraph("Analisi non disponibile.")
+
+        doc.add_heading("Risultato", level=2)
+        if _num_ok(row.get("gol_casa")) and _num_ok(row.get("gol_trasferta")):
+            doc.add_paragraph(f"{int(row['gol_casa'])} - {int(row['gol_trasferta'])}")
+        else:
+            doc.add_paragraph("In attesa")
+
+    bio = io.BytesIO(); doc.save(bio); return bio.getvalue()
+
+
+def genera_docx_nuova_analisi(df, comp_df):
+    """Archivio Word con la NUOVA analisi ragionata (evidenze + convergenze + signal),
+    una pagina per partita seguita, più i dati soliti (ultime partite, quote, risultato)."""
+    try:
+        from docx import Document
+    except Exception:
+        raise RuntimeError("Libreria python-docx non disponibile. "
+                           "Aggiungi 'python-docx' a requirements.txt.")
+    doc = Document()
+    fx = df[df["is_target"] == True] if "is_target" in df.columns else df.iloc[0:0]
+    if "data" in fx.columns:
+        fx = fx.sort_values("data", ascending=False)
+    if fx.empty:
+        doc.add_heading("Archivio partite — nuova analisi", level=1)
+        doc.add_paragraph("Nessuna partita seguita da esportare.")
+        bio = io.BytesIO(); doc.save(bio); return bio.getvalue()
+
+    first = True
+    for _, row in fx.iterrows():
+        if not first:
+            doc.add_page_break()
+        first = False
+        home, away = row["squadra_casa"], row["squadra_trasferta"]
+        doc.add_heading(f"{home} - {away}", level=1)
+        data = row["data"].strftime("%d.%m.%Y") if hasattr(row["data"], "strftime") else _txt(row.get("data"))
+        meta = []
+        if _txt(row.get("competizione")):
+            meta.append(f"Campionato: {_label_da_comp(row.get('competizione'), comp_df)}")
+        if data:
+            meta.append(f"Data: {data}")
+        if _txt(row.get("ora")):
+            meta.append(f"Ora: {_txt(row.get('ora'))}")
+        if meta:
+            doc.add_paragraph().add_run("    ".join(meta)).italic = True
+
+        doc.add_heading(f"Ultime partite {home}", level=2)
+        for r in _ultime_partite_testo(df, home):
+            doc.add_paragraph(r, style="List Bullet")
+        doc.add_heading(f"Ultime partite {away}", level=2)
+        for r in _ultime_partite_testo(df, away):
+            doc.add_paragraph(r, style="List Bullet")
+
+        odds = _eff_odds(row)
+        if odds:
+            doc.add_heading("Quote", level=2)
+            etich = [("1", "1"), ("X", "X"), ("2", "2"), ("over25", "Over 2.5"),
+                     ("under25", "Under 2.5"), ("goal", "Goal"), ("nogoal", "No Goal")]
+            righe_q = [f"{lab}: {odds[k]}" for k, lab in etich if odds.get(k)]
+            if righe_q:
+                doc.add_paragraph("   ·   ".join(righe_q))
+
+        # analisi ragionata (pre-partita, filtrata per data)
+        doc.add_heading("Analisi ragionata", level=2)
+        racc = analisi_ragionata(df, home, away, data_partita=row.get("data"),
+                                 odds=odds, variazioni=_variazioni_da_row(row))
+        if not racc:
+            doc.add_paragraph("Storico insufficiente per l'analisi.")
+        else:
+            doc.add_paragraph().add_run(f"Pronostico: {racc['pronostico']['testo']}").bold = True
+            for sez in racc["sezioni"]:
+                doc.add_heading(sez["titolo"], level=3)
+                for r in sez["righe"]:
+                    doc.add_paragraph(r, style="List Bullet")
 
         doc.add_heading("Risultato", level=2)
         if _num_ok(row.get("gol_casa")) and _num_ok(row.get("gol_trasferta")):
@@ -2403,20 +2514,29 @@ def pagina_configurazione(user):
     st.caption("Scarica un documento Word con una pagina per partita seguita: intestazione "
                "(squadre, campionato, data, ora), ultime partite delle due squadre, e il "
                "risultato. Un database esterno consultabile anche fuori dall'app.")
-    ca = st.columns(2)
+    ca = st.columns(3)
     try:
         dfp = carica_partite()
         cdf = carica_competizioni()
         ca[0].download_button(
-            "⬇️ Word completo (con analisi)",
+            "⬇️ Partite nuova analisi",
+            data=genera_docx_nuova_analisi(dfp, cdf),
+            file_name="archivio_nuova_analisi.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            help="Solo la nuova analisi ragionata (evidenze, convergenze, signal score) "
+                 "più i dati soliti delle partite.")
+        ca[1].download_button(
+            "⬇️ Partite vecchia analisi",
             data=genera_docx_archivio(dfp, cdf, con_analisi=True),
             file_name="archivio_partite_con_analisi.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-        ca[1].download_button(
-            "⬇️ Word senza analisi",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            help="L'analisi statistica Elo/Poisson con tutti i mercati (come finora).")
+        ca[2].download_button(
+            "⬇️ Partite senza analisi",
             data=genera_docx_archivio(dfp, cdf, con_analisi=False),
             file_name="archivio_partite.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            help="Solo intestazione, ultime partite, quote e risultato.")
     except Exception as e:
         st.error(f"Impossibile generare il Word: {e}")
 
@@ -2603,6 +2723,63 @@ def _col_conf(v):  # v in 0..100
     return COL["win"] if v >= 65 else (COL["draw"] if v >= 45 else COL["loss"])
 
 
+def _partite_squadra_evidenze(df, team, prima_di=None):
+    """Estrae le partite giocate di una squadra nel formato del nuovo motore
+    (gf/gs dal suo punto di vista, casa True/False), dalla più recente. Filtra per
+    data < prima_di così l'analisi resta 'pre-partita' anche a match concluso."""
+    if df.empty:
+        return []
+    d = df[(df["squadra_casa"] == team) | (df["squadra_trasferta"] == team)]
+    d = d[d["gol_casa"].notna() & d["gol_trasferta"].notna()]
+    if prima_di is not None and "data" in d.columns:
+        try:
+            d = d[d["data"] < prima_di]
+        except Exception:
+            pass
+    if "data" in d.columns:
+        d = d.sort_values("data", ascending=False)
+    out = []
+    for _, m in d.iterrows():
+        if m["squadra_casa"] == team:
+            out.append({"gf": int(m["gol_casa"]), "gs": int(m["gol_trasferta"]), "casa": True})
+        else:
+            out.append({"gf": int(m["gol_trasferta"]), "gs": int(m["gol_casa"]), "casa": False})
+    return out
+
+
+def analisi_ragionata(df, home, away, data_partita=None, odds=None, variazioni=None):
+    """Ponte verso il nuovo motore: evidenze -> signal score -> racconto.
+    Ritorna il dict del racconto, oppure None se manca lo storico."""
+    ph = _partite_squadra_evidenze(df, home, data_partita)
+    pa = _partite_squadra_evidenze(df, away, data_partita)
+    if not ph or not pa:
+        return None
+    ev = evidenze.costruisci_evidenze(ph, pa, odds=odds, variazioni=variazioni)
+    sig = segnali.calcola_signal(ev)
+    return racconto.racconta(home, away, ev, sig)
+
+
+def render_racconto_st(racc):
+    """Rende l'analisi ragionata (nuovo motore) in Streamlit."""
+    if not racc:
+        st.info("Analisi ragionata non disponibile (storico insufficiente).")
+        return
+    pron = racc["pronostico"]
+    colore = COL["win"] if pron["score"] >= 68 else (COL["draw"] if pron["score"] >= 45 else COL["loss"])
+    st.html(
+        f'<div style="{FONT}max-width:560px;background:{COL["panel"]};border:1px solid {COL["line"]};'
+        f'border-left:4px solid {colore};border-radius:14px;padding:16px;margin-bottom:6px;">'
+        f'<div style="color:{COL["lo"]};font-size:11px;text-transform:uppercase;letter-spacing:.15em;">'
+        f'Pronostico ragionato</div>'
+        f'<div style="color:{COL["hi"]};font-size:20px;font-weight:700;margin-top:6px;">'
+        f'{_esc(pron["testo"])}</div></div>')
+    for sez in racc["sezioni"]:
+        with st.expander(sez["titolo"], expanded=sez["titolo"] in
+                         ("Migliori mercati", "Pattern principali e convergenze")):
+            for r in sez["righe"]:
+                st.markdown(f"- {r}")
+
+
 def _ultime_partite_testo(df, team, n=15):
     """Righe di testo con le ultime partite giocate di una squadra."""
     if df.empty:
@@ -2770,6 +2947,15 @@ def pagina_analisi(user):
     if a.get("errore"):
         st.warning(f"Dati storici insufficienti ({a.get('n_home',0)} / {a.get('n_away',0)} partite).")
         return
+
+    # === NUOVA ANALISI RAGIONATA (evidenze + signal score + racconto) ===
+    st.subheader("🧠 Analisi ragionata")
+    racc = analisi_ragionata(df, home, away, data_partita=data_partita,
+                             odds=odds, variazioni=variazioni)
+    render_racconto_st(racc)
+
+    st.divider()
+    st.subheader("📐 Analisi statistica (Elo / Poisson)")
 
     p = a["prob"]
 
@@ -3126,13 +3312,28 @@ def pagina_storico_pronostici(user):
         idxs = []
     if idxs:
         r = pron.iloc[idxs[0]]
-        st.subheader("📋 Riepilogo da copiare (note)")
-        txt = _txt(r.get("riepilogo")) if "riepilogo" in pron.columns else ""
-        if txt:
-            st.code(txt, language=None)
+        home = _txt(r.get("squadra_casa"))
+        away = _txt(r.get("squadra_trasferta"))
+        st.divider()
+        st.subheader(f"🔎 {home} - {away}")
+        # scheda completa salvata (snapshot), altrimenti il testo del riepilogo
+        snap = None
+        if "scheda_json" in pron.columns and _txt(r.get("scheda_json")):
+            try:
+                snap = json.loads(r["scheda_json"])
+            except Exception:
+                snap = None
+        if snap:
+            render_scheda_st(snap, home, away)
         else:
-            st.info("Per questo pronostico non è stato salvato il riepilogo "
-                    "(verrà salvato per i pronostici generati d'ora in avanti).")
+            txt = _txt(r.get("riepilogo")) if "riepilogo" in pron.columns else ""
+            st.markdown("**📋 Riepilogo da copiare (note)**")
+            if txt:
+                st.code(txt, language=None)
+            else:
+                st.info("Per questo pronostico non è stata salvata la scheda completa. "
+                        "Verrà salvata riaprendo la partita in 🔮 Analisi prima che si giochi, "
+                        "oppure per i pronostici generati d'ora in avanti.")
     st.caption("Nota: la percentuale di riuscita è indicativa finché i numeri sono piccoli. "
                "Serve tempo e volume per trarne conclusioni.")
 
