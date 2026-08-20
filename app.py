@@ -363,15 +363,15 @@ def partite_per_export(df):
 # =============================================================================
 #  DB PARTITE
 # =============================================================================
-@st.cache_data(ttl=600, show_spinner=False)
-def _fetch_tutte(cli, tabella, order_col="data", desc=True):
+def _fetch_tutte(_cli, tabella, order_col="data", desc=True):
     """Scarica TUTTE le righe di una tabella superando il limite di 1000 di Supabase,
-    con paginazione a blocchi. Senza questo, le righe più vecchie sparivano."""
+    con paginazione a blocchi. Senza questo, le righe più vecchie sparivano.
+    NON va messa in cache: riceve il client Supabase (non hashabile)."""
     righe = []
     step = 1000
     start = 0
     while True:
-        q = cli.table(tabella).select("*")
+        q = _cli.table(tabella).select("*")
         if order_col:
             q = q.order(order_col, desc=desc)
         res = q.range(start, start + step - 1).execute()
@@ -383,6 +383,7 @@ def _fetch_tutte(cli, tabella, order_col="data", desc=True):
     return righe
 
 
+@st.cache_data(ttl=600, show_spinner=False)
 def carica_partite():
     cli = get_client()
     if not cli:
