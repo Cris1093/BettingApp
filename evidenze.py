@@ -52,61 +52,70 @@ def frequenza_label(p, tot):
 
 # ------------------------------------------------------------------ split squadra
 def _blocco(partite):
-    """Calcola tutte le metriche su un insieme di partite di UNA squadra."""
+    """Calcola tutte le metriche su un insieme di partite di UNA squadra.
+    Ogni partita può avere un 'peso' (default 1.0): il RECORD (V/N/P, gol) resta intero
+    e onesto, ma le PERCENTUALI sono pesate (amichevoli e categorie inferiori contano meno)."""
     n = len(partite)
     if n == 0:
         return {"n": 0}
+    W = sum(p.get("peso", 1.0) for p in partite) or 1.0
     v = d = s = 0
     gf = gs = 0
-    over = {ln: 0 for ln in (0.5, 1.5, 2.5, 3.5, 4.5, 5.5)}
-    goal = nogoal = clean = nosegna = 0
-    almeno1_fatto = almeno1_subito = 0
-    dist = {}                      # distribuzione gol TOTALI
-    dist_team = {}                 # distribuzione gol della squadra
+    # accumulatori PESATI (per le percentuali)
+    vw = dw = sw = 0.0
+    over = {ln: 0.0 for ln in (0.5, 1.5, 2.5, 3.5, 4.5, 5.5)}
+    goalw = nogoalw = cleanw = nosegnaw = 0.0
+    a1f = a1s = 0.0
+    dist = {}                      # distribuzione gol TOTALI (pesata)
+    dist_team = {}                 # distribuzione gol della squadra (pesata)
     for p in partite:
+        w = p.get("peso", 1.0)
         f, a = int(p["gf"]), int(p["gs"])
         gf += f
         gs += a
         if f > a:
-            v += 1
+            v += 1; vw += w
         elif f == a:
-            d += 1
+            d += 1; dw += w
         else:
-            s += 1
+            s += 1; sw += w
         tot = f + a
         for ln in over:
             if tot > ln:
-                over[ln] += 1
+                over[ln] += w
         if f > 0 and a > 0:
-            goal += 1
+            goalw += w
         else:
-            nogoal += 1
+            nogoalw += w
         if a == 0:
-            clean += 1
+            cleanw += w
         if f == 0:
-            nosegna += 1
+            nosegnaw += w
         if f >= 1:
-            almeno1_fatto += 1
+            a1f += w
         if a >= 1:
-            almeno1_subito += 1
-        dist[tot] = dist.get(tot, 0) + 1
-        dist_team[f] = dist_team.get(f, 0) + 1
+            a1s += w
+        dist[tot] = dist.get(tot, 0.0) + w
+        dist_team[f] = dist_team.get(f, 0.0) + w
+    def pw(x):
+        return _r2(x / W * 100.0)
+    under_w = W - over[2.5]
     return {
         "n": n, "v": v, "d": d, "s": s, "gf": gf, "gs": gs,
         "media_tot": _r2((gf + gs) / n), "media_fatti": _r2(gf / n), "media_subiti": _r2(gs / n),
-        "over": {ln: {"n": c, "pct": _r2(_pct(c, n))} for ln, c in over.items()},
-        "under25": {"n": n - over[2.5], "pct": _r2(_pct(n - over[2.5], n))},
-        "goal": {"n": goal, "pct": _r2(_pct(goal, n))},
-        "nogoal": {"n": nogoal, "pct": _r2(_pct(nogoal, n))},
-        "almeno1_fatto": {"n": almeno1_fatto, "pct": _r2(_pct(almeno1_fatto, n))},
-        "almeno1_subito": {"n": almeno1_subito, "pct": _r2(_pct(almeno1_subito, n))},
-        "clean": {"n": clean, "pct": _r2(_pct(clean, n))},
-        "nosegna": {"n": nosegna, "pct": _r2(_pct(nosegna, n))},
-        "vitt": {"n": v, "pct": _r2(_pct(v, n))},
-        "pari": {"n": d, "pct": _r2(_pct(d, n))},
-        "sconf": {"n": s, "pct": _r2(_pct(s, n))},
-        "dist_tot": {k: {"n": c, "pct": _r2(_pct(c, n))} for k, c in sorted(dist.items())},
-        "dist_team": {k: {"n": c, "pct": _r2(_pct(c, n))} for k, c in sorted(dist_team.items())},
+        "over": {ln: {"n": round(c, 1), "pct": pw(c)} for ln, c in over.items()},
+        "under25": {"n": round(under_w, 1), "pct": pw(under_w)},
+        "goal": {"n": round(goalw, 1), "pct": pw(goalw)},
+        "nogoal": {"n": round(nogoalw, 1), "pct": pw(nogoalw)},
+        "almeno1_fatto": {"n": round(a1f, 1), "pct": pw(a1f)},
+        "almeno1_subito": {"n": round(a1s, 1), "pct": pw(a1s)},
+        "clean": {"n": round(cleanw, 1), "pct": pw(cleanw)},
+        "nosegna": {"n": round(nosegnaw, 1), "pct": pw(nosegnaw)},
+        "vitt": {"n": v, "pct": pw(vw)},
+        "pari": {"n": d, "pct": pw(dw)},
+        "sconf": {"n": s, "pct": pw(sw)},
+        "dist_tot": {k: {"n": round(c, 1), "pct": pw(c)} for k, c in sorted(dist.items())},
+        "dist_team": {k: {"n": round(c, 1), "pct": pw(c)} for k, c in sorted(dist_team.items())},
     }
 
 
@@ -287,9 +296,9 @@ def _prob_pesata(home, away, chiave, sub=None):
     return _r2(sum(comp) / len(comp)) if comp else None
 
 
-def probabilita_coerenti(home, away):
+def probabilita_coerenti(home, away, hcap_home=1.0, hcap_away=1.0):
     """Probabilità COERENTI dei mercati: Over+Under=100, Goal+NoGoal=100, 1+X+2=100.
-    Base per il Signal Score. Tutto da frequenze pesate, niente stime arbitrarie."""
+    hcap_home/away: handicap di livello (una squadra da categoria inferiore parte sotto)."""
     over = _prob_pesata(home, away, "over", 2.5)
     goal = _prob_pesata(home, away, "goal")
     out = {}
@@ -299,8 +308,7 @@ def probabilita_coerenti(home, away):
     if goal is not None:
         out["Goal"] = goal
         out["No Goal"] = _r2(100 - goal)
-    # 1X2: forza relativa normalizzata a 100, con vantaggio casa e freno coppe
-    p1, px, p2 = _prob_1x2(home, away)
+    p1, px, p2 = _prob_1x2(home, away, hcap_home, hcap_away)
     out["1"], out["X"], out["2"] = p1, px, p2
     out["1X"] = _r2(min(100, p1 + px))
     out["X2"] = _r2(min(100, px + p2))
@@ -320,13 +328,14 @@ def _forza(blocco_gen, blocco_split, blocco_rec):
     return (num / den) if den else 0.5
 
 
-def _prob_1x2(home, away):
+def _prob_1x2(home, away, hcap_home=1.0, hcap_away=1.0):
     """Probabilità 1/X/2 COERENTI (sommano a 100), con la logica richiesta:
     - se la CASA non perde quasi mai in casa -> la X e il 2 si comprimono (1X sicuro)
     - se l'OSPITE perde molto in trasferta -> l'1 sale davvero
-    - se l'ospite è forte fuori -> l'1 resta prudente (non gonfiato)."""
-    fh = _forza(home["generale"], home["split"], home["recenti5"])
-    fa = _forza(away["generale"], away["split"], away["recenti5"])
+    - se l'ospite è forte fuori -> l'1 resta prudente (non gonfiato)
+    - handicap di livello: una squadra da categoria inferiore parte svantaggiata."""
+    fh = _forza(home["generale"], home["split"], home["recenti5"]) * hcap_home
+    fa = _forza(away["generale"], away["split"], away["recenti5"]) * hcap_away
     sh = fh + 0.12          # vantaggio campo
     sa = fa
     # attenuazione base verso la media, per non gonfiare il favorito
@@ -359,7 +368,8 @@ def _prob_1x2(home, away):
     return _r2(p1 / s * 100), _r2(x / s * 100), _r2(p2 / s * 100)
 
 
-def costruisci_evidenze(partite_home, partite_away, odds=None, variazioni=None):
+def costruisci_evidenze(partite_home, partite_away, odds=None, variazioni=None,
+                        hcap_home=1.0, hcap_away=1.0):
     """Punto d'ingresso: costruisce l'intero quadro di evidenze per la partita."""
     home = analizza_squadra(partite_home, "casa")
     away = analizza_squadra(partite_away, "trasf")
@@ -371,7 +381,8 @@ def costruisci_evidenze(partite_home, partite_away, odds=None, variazioni=None):
         "convergenze": convergenze(home, away),
         "contraddizioni": contraddizioni(home, "Casa") + contraddizioni(away, "Trasferta"),
         "quote": analizza_quote(odds, variazioni),
-        "prob": probabilita_coerenti(home, away),
+        "prob": probabilita_coerenti(home, away, hcap_home, hcap_away),
+        "hcap_home": hcap_home, "hcap_away": hcap_away,
         "n_home": home["generale"].get("n", 0),
         "n_away": away["generale"].get("n", 0),
     }

@@ -338,11 +338,37 @@ def _contesto_coppa(competizione):
                       "diverso dal solito."]}
 
 
+def _peso_dati(home_name, away_name, ev):
+    """Trasparenza: quali partite sono state pesate meno e l'handicap di livello."""
+    info = ev.get("peso_info")
+    if not info:
+        return None
+    righe = []
+    for nome, chiave in ((home_name, "home"), (away_name, "away")):
+        d = info.get(chiave, {})
+        motivi = d.get("motivi", {})
+        hc = d.get("handicap", 1.0)
+        parti = []
+        if motivi:
+            parti.append("pesate meno: " + ", ".join(f"{n} {m}" for m, n in motivi.items()))
+        if hc < 0.98:
+            parti.append(f"handicap forza {hc:.2f} (categoria giocata inferiore alla partita)")
+        if parti:
+            righe.append(f"{nome}: " + "; ".join(parti) + ".")
+    if not righe:
+        return None
+    righe.append("Le percentuali tengono conto di questi pesi; il record V/N/P resta quello reale.")
+    return {"titolo": "Peso dei dati (contesto)", "righe": righe}
+
+
 def racconta(home_name, away_name, ev, signal, competizione=None):
     sezioni = []
     coppa = _contesto_coppa(competizione)
     if coppa:
         sezioni.append(coppa)
+    peso = _peso_dati(home_name, away_name, ev)
+    if peso:
+        sezioni.append(peso)
     sezioni.extend([
         _sintesi(home_name, away_name, ev),
         _forma_generale(home_name, away_name, ev),

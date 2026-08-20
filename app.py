@@ -12,6 +12,7 @@ Funzionalità v1:
 """
 
 import html as _html
+import hashlib
 import io
 import json
 import re
@@ -1629,10 +1630,13 @@ def pagina_database(user):
 
     st.caption(f"{len(vis)} partite (senza risultato in cima, poi dalla più recente).")
 
-    # ordina: prima le partite SENZA risultato (da aggiornare), poi le altre per data desc
+    # ordina: prima le partite SENZA risultato (da aggiornare), poi le altre per data desc.
+    # Aggiungo l'id come ultimo criterio: ordine DETERMINISTICO (niente riordini casuali
+    # su parità di data, che confondevano l'editor).
     vis = vis.copy()
     vis["_senza_ris"] = vis["gol_casa"].isna() | vis["gol_trasferta"].isna()
     ordina = ["_senza_ris"] + (["data"] if "data" in vis.columns else [])
+    ordina += (["id"] if "id" in vis.columns else [])
     vis = vis.sort_values(ordina, ascending=[False] + [False] * (len(ordina) - 1))
 
     # opzioni competizione dal menu (competizioni a sistema) + valori già presenti
@@ -1661,8 +1665,14 @@ def pagina_database(user):
     }).reset_index(drop=True)
     orig = vista.copy()   # per confrontare cosa è cambiato
 
+    # Chiave dell'editor legata all'ORDINE degli id: se la tabella si riordina (es. dopo
+    # un salvataggio, quando le partite con risultato scendono), la chiave cambia e
+    # l'editor riparte pulito, senza riapplicare modifiche vecchie a righe diverse.
+    _firma_righe = ",".join(str(x) for x in vista["id"].tolist())
+    _key_editor = "editor_db_" + hashlib.md5(_firma_righe.encode()).hexdigest()[:10]
+
     edit = st.data_editor(
-        vista, use_container_width=True, hide_index=True, key="editor_db",
+        vista, use_container_width=True, hide_index=True, key=_key_editor,
         disabled=["id", "Casa", "Trasferta"],
         column_config={
             "id": None,  # nascosta
@@ -1717,6 +1727,7 @@ def pagina_database(user):
             if records:
                 aggiorna_partite(records)
                 st.success(f"Aggiornate {len(records)} partite.")
+                st.rerun()   # ricarica pulito: la tabella si riordina e l'editor riparte da zero
             else:
                 st.info("Nessuna modifica da salvare.")
         except Exception as e:
@@ -2515,32 +2526,38 @@ def pagina_configurazione(user):
     st.subheader("📄 Archivio partite (Word)")
     st.caption("Scarica un documento Word con una pagina per partita seguita: intestazione "
                "(squadre, campionato, data, ora), ultime partite delle due squadre, e il "
-               "risultato. Un database esterno consultabile anche fuori dall'app.")
-    ca = st.columns(3)
-    try:
-        dfp = carica_partite()
-        cdf = carica_competizioni()
+               "risultato. I file vengono generati solo quando premi 'Prepara' (così la "
+               "pagina resta veloce).")
+    if st.button("🔄 Prepara i file Word", key="prepara_word"):
+        try:
+            dfp = carica_partite()
+            cdf = carica_competizioni()
+            with st.spinner("Genero i documenti Word…"):
+                st.session_state["_docx_nuova"] = genera_docx_nuova_analisi(dfp, cdf)
+                st.session_state["_docx_vecchia"] = genera_docx_archivio(dfp, cdf, con_analisi=True)
+                st.session_state["_docx_senza"] = genera_docx_archivio(dfp, cdf, con_analisi=False)
+            st.success("File pronti: usa i pulsanti di download qui sotto.")
+        except Exception as e:
+            st.error(f"Impossibile generare il Word: {e}")
+    if st.session_state.get("_docx_nuova"):
+        ca = st.columns(3)
         ca[0].download_button(
-            "⬇️ Partite nuova analisi",
-            data=genera_docx_nuova_analisi(dfp, cdf),
+            "⬇️ Partite nuova analisi", data=st.session_state["_docx_nuova"],
             file_name="archivio_nuova_analisi.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            help="Solo la nuova analisi ragionata (evidenze, convergenze, signal score) "
-                 "più i dati soliti delle partite.")
+            help="Solo la nuova analisi ragionata più i dati soliti delle partite.")
         ca[1].download_button(
-            "⬇️ Partite vecchia analisi",
-            data=genera_docx_archivio(dfp, cdf, con_analisi=True),
+            "⬇️ Partite vecchia analisi", data=st.session_state["_docx_vecchia"],
             file_name="archivio_partite_con_analisi.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            help="L'analisi statistica Elo/Poisson con tutti i mercati (come finora).")
+            help="L'analisi statistica Elo/Poisson con tutti i mercati.")
         ca[2].download_button(
-            "⬇️ Partite senza analisi",
-            data=genera_docx_archivio(dfp, cdf, con_analisi=False),
+            "⬇️ Partite senza analisi", data=st.session_state["_docx_senza"],
             file_name="archivio_partite.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             help="Solo intestazione, ultime partite, quote e risultato.")
-    except Exception as e:
-        st.error(f"Impossibile generare il Word: {e}")
+        st.caption("Nota: i file riflettono i dati di quando hai premuto 'Prepara'. "
+                   "Se aggiorni partite o quote, ripremi 'Prepara' per rigenerarli.")
 
     st.divider()
     st.subheader("🏆 Competizioni")
@@ -2725,11 +2742,54 @@ def _col_conf(v):  # v in 0..100
     return COL["win"] if v >= 65 else (COL["draw"] if v >= 45 else COL["loss"])
 
 
-def _partite_squadra_evidenze(df, team, prima_di=None, escludi_id=None):
+def _peso_partita(match_comp, comp_df, target_livello, target_categoria, target_comp_key):
+    """Peso di una partita storica in base al contesto, relativo alla partita da
+    pronosticare: amichevoli e categorie inferiori pesano meno; stessa competizione
+    pesa di più. Ritorna (peso, motivo|None)."""
+    peso, motivo = 1.0, None
+    cat = categoria_di(match_comp, comp_df)          # Amichevole/Coppa.../Campionato/None
+    liv = _livello_di(match_comp, comp_df)           # int o None
+    ckey = _key(match_comp) if match_comp else None
+
+    # amichevole = rumore
+    if cat == "Amichevole":
+        return 0.35, "amichevole"
+    # stessa identica competizione del match target -> peso pieno/rinforzato
+    if target_comp_key and ckey == target_comp_key:
+        return 1.25, "stessa competizione"
+    # categoria inferiore rispetto al target (es. LL2 quando il target è in Liga)
+    if liv is not None and target_livello is not None and liv > target_livello:
+        diff = liv - target_livello
+        peso = max(0.35, 1.0 - 0.35 * diff)
+        motivo = f"categoria inferiore (liv. {liv} vs {target_livello})"
+        return peso, motivo
+    # coppa (avversari di livello misto) -> leggermente ridotta
+    if cat in ("Coppa nazionale", "Coppa internazionale"):
+        return 0.85, "coppa (livello avversari misto)"
+    return peso, motivo
+
+
+def _livello_di(codice, comp_df):
+    if comp_df is None or comp_df.empty or "livello" not in comp_df.columns:
+        return None
+    k = _key(codice)
+    for _, c in comp_df.iterrows():
+        if k in _chiavi_competizione(c):
+            liv = c.get("livello")
+            try:
+                return int(liv) if not pd.isna(liv) else None
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _partite_squadra_evidenze(df, team, prima_di=None, escludi_id=None,
+                              comp_df=None, target_livello=None, target_categoria=None,
+                              target_comp_key=None):
     """Estrae le partite giocate di una squadra nel formato del nuovo motore
-    (gf/gs dal suo punto di vista, casa True/False), dalla più recente. Filtra per
-    data < prima_di e ESCLUDE la fixture stessa (escludi_id) così l'analisi resta
-    davvero 'pre-partita' anche a match concluso."""
+    (gf/gs dal suo punto di vista, casa True/False, peso), dalla più recente. Filtra per
+    data < prima_di e ESCLUDE la fixture stessa. Assegna a ogni partita un PESO in base
+    al contesto (amichevole/categoria/competizione) relativo alla partita da pronosticare."""
     if df.empty:
         return []
     d = df[(df["squadra_casa"] == team) | (df["squadra_trasferta"] == team)]
@@ -2745,23 +2805,74 @@ def _partite_squadra_evidenze(df, team, prima_di=None, escludi_id=None):
         d = d.sort_values("data", ascending=False)
     out = []
     for _, m in d.iterrows():
+        peso, motivo = 1.0, None
+        if comp_df is not None:
+            peso, motivo = _peso_partita(m.get("competizione"), comp_df,
+                                         target_livello, target_categoria, target_comp_key)
+        rec = {"peso": peso, "motivo_peso": motivo,
+               "livello": _livello_di(m.get("competizione"), comp_df) if comp_df is not None else None}
         if m["squadra_casa"] == team:
-            out.append({"gf": int(m["gol_casa"]), "gs": int(m["gol_trasferta"]), "casa": True})
+            rec.update({"gf": int(m["gol_casa"]), "gs": int(m["gol_trasferta"]), "casa": True})
         else:
-            out.append({"gf": int(m["gol_trasferta"]), "gs": int(m["gol_casa"]), "casa": False})
+            rec.update({"gf": int(m["gol_trasferta"]), "gs": int(m["gol_casa"]), "casa": False})
+        out.append(rec)
     return out
+
+
+def _handicap_livello(partite, target_livello):
+    """Handicap di forza per una squadra che ha giocato in una categoria diversa dal
+    target. Se il livello medio giocato è INFERIORE (numero più alto) al target, la
+    squadra parte svantaggiata (es. sale dalla seconda divisione)."""
+    if target_livello is None:
+        return 1.0
+    num = den = 0.0
+    for p in partite:
+        liv = p.get("livello")
+        if liv is None:
+            continue
+        w = p.get("peso", 1.0)
+        num += liv * w
+        den += w
+    if den == 0:
+        return 1.0
+    avg = num / den
+    if avg <= target_livello + 0.15:      # gioca al livello target o superiore
+        return 1.0
+    diff = avg - target_livello
+    return max(0.55, 1.0 - 0.28 * diff)   # ogni livello sotto -> ~28% di handicap
 
 
 def analisi_ragionata(df, home, away, data_partita=None, odds=None, variazioni=None, escludi_id=None, competizione=None):
     """Ponte verso il nuovo motore: evidenze -> signal score -> racconto.
     Ritorna il dict del racconto, oppure None se manca lo storico."""
-    ph = _partite_squadra_evidenze(df, home, data_partita, escludi_id)
-    pa = _partite_squadra_evidenze(df, away, data_partita, escludi_id)
+    comp_df = carica_competizioni()
+    t_liv = _livello_di(competizione, comp_df) if competizione else None
+    t_cat = categoria_di(competizione, comp_df) if competizione else None
+    t_key = _key(competizione) if competizione else None
+    ph = _partite_squadra_evidenze(df, home, data_partita, escludi_id, comp_df, t_liv, t_cat, t_key)
+    pa = _partite_squadra_evidenze(df, away, data_partita, escludi_id, comp_df, t_liv, t_cat, t_key)
     if not ph or not pa:
         return None
-    ev = evidenze.costruisci_evidenze(ph, pa, odds=odds, variazioni=variazioni)
+    hcap_h = _handicap_livello(ph, t_liv)
+    hcap_a = _handicap_livello(pa, t_liv)
+    ev = evidenze.costruisci_evidenze(ph, pa, odds=odds, variazioni=variazioni,
+                                      hcap_home=hcap_h, hcap_away=hcap_a)
+    ev["peso_info"] = {"home": _riepilogo_pesi(ph, hcap_h),
+                       "away": _riepilogo_pesi(pa, hcap_a)}
     sig = segnali.calcola_signal(ev)
     return racconto.racconta(home, away, ev, sig, competizione=competizione)
+
+
+def _riepilogo_pesi(partite, hcap):
+    """Riassume quante partite sono state pesate meno e perché, per la trasparenza."""
+    motivi = {}
+    for p in partite:
+        mo = p.get("motivo_peso")
+        if mo:
+            # normalizza "categoria inferiore (liv. 2 vs 1)" -> "categoria inferiore"
+            base = mo.split(" (")[0]
+            motivi[base] = motivi.get(base, 0) + 1
+    return {"motivi": motivi, "handicap": round(hcap, 2)}
 
 
 def render_racconto_st(racc):
