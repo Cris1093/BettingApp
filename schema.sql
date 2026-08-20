@@ -61,6 +61,8 @@ create table if not exists pronostici (
     gol_casa     int, gol_trasferta int,   -- risultato reale (riempito dopo)
     riepilogo    text,                      -- testo pre-partita (ultime partite + quote + pronostico)
     scheda_json  text,                      -- snapshot analisi COMPLETA (tutti i mercati) pre-partita
+    mercato_ragionato text,                 -- pronostico del metodo ragionato (per confronto)
+    score_ragionato   int,
     creato_il    timestamptz default now()
 );
 
@@ -98,6 +100,8 @@ create table if not exists competizioni (
 --    alter table competizioni add column if not exists livello int;
 --    alter table pronostici add column if not exists riepilogo text;
 --    alter table pronostici add column if not exists scheda_json text;
+--    alter table pronostici add column if not exists mercato_ragionato text;
+--    alter table pronostici add column if not exists score_ragionato int;
 --    (le tabelle competizioni, pronostici e calibrazione vengono create dai blocchi
 --     'create table if not exists' qui sopra: rilancia lo schema per crearle)
 --

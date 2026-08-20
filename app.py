@@ -559,15 +559,17 @@ def upsert_pronostico(record):
         else:
             cli.table("pronostici").insert(rec).execute()
 
+    _opzionali = ("scheda_json", "riepilogo", "mercato_ragionato", "score_ragionato")
     try:
         _do(record)
     except Exception:
-        # fallback progressivo: togli prima solo scheda_json, poi anche riepilogo,
-        # così non si perde il riepilogo quando manca solo la colonna scheda_json
+        # fallback progressivo: rimuovi le colonne opzionali che il DB potrebbe non avere
+        rec2 = {k: v for k, v in record.items()
+                if k not in ("scheda_json", "mercato_ragionato", "score_ragionato")}
         try:
-            _do({k: v for k, v in record.items() if k != "scheda_json"})
+            _do(rec2)
         except Exception:
-            _do({k: v for k, v in record.items() if k not in ("scheda_json", "riepilogo")})
+            _do({k: v for k, v in record.items() if k not in _opzionali})
     st.cache_data.clear()
 
 
@@ -3297,6 +3299,11 @@ def pagina_analisi(user):
         salvati = st.session_state.setdefault("auto_pron", set())
         if sig not in salvati:
             try:
+                merc_rag = None
+                score_rag = None
+                if racc and racc.get("pronostico"):
+                    merc_rag = racc["pronostico"].get("mercato")
+                    score_rag = racc["pronostico"].get("score")
                 upsert_pronostico({
                     "partita_id": str(row["id"]),
                     "data": str(row["data"]) if "data" in row else None,
@@ -3308,6 +3315,8 @@ def pagina_analisi(user):
                     "prob_1": float(p["1"]), "prob_x": float(p["X"]), "prob_2": float(p["2"]),
                     "riepilogo": testo,
                     "scheda_json": json.dumps(_snapshot_analisi(a, odds)),
+                    "mercato_ragionato": merc_rag,
+                    "score_ragionato": int(score_rag) if score_rag is not None else None,
                 })
                 salvati.add(sig)
                 st.caption("💾 Pronostico salvato automaticamente in 📈 Storico pronostici.")
@@ -3463,37 +3472,70 @@ def pagina_storico_pronostici(user):
 
     righe = []
     vinti = persi = aperti = 0
+    vinti_rag = persi_rag = 0
     for _, r in pron.iterrows():
         gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
         esito = ""
+        esito_rag = ""
+        merc_rag = _txt(r.get("mercato_ragionato")) if "mercato_ragionato" in pron.columns else ""
         if gc is not None and gt is not None and not (pd.isna(gc) or pd.isna(gt)):
             ris = f"{int(gc)}-{int(gt)}"
             won = _pronostico_vinto(r.get("mercato") or "", gc, gt)
             if won is True:
-                esito, _t = "✅ vinto", vinti
+                esito = "✅ vinto"
                 vinti += 1
             elif won is False:
                 esito = "❌ perso"
                 persi += 1
             else:
                 esito = "—"
+            # esito del metodo ragionato
+            if merc_rag:
+                won_r = _pronostico_vinto(merc_rag, gc, gt)
+                if won_r is True:
+                    esito_rag = "✅ vinto"
+                    vinti_rag += 1
+                elif won_r is False:
+                    esito_rag = "❌ perso"
+                    persi_rag += 1
+                else:
+                    esito_rag = "—"
         else:
             ris = "in attesa"
             aperti += 1
         righe.append({
             "Data": r.get("data"), "Casa": r.get("squadra_casa"),
-            "Trasferta": r.get("squadra_trasferta"), "Pronostico": r.get("mercato"),
+            "Trasferta": r.get("squadra_trasferta"),
+            "Pronostico (vecchio)": r.get("mercato"),
             "Conf.": None if pd.isna(r.get("confidence")) else int(r.get("confidence")),
-            "Stat %": None if pd.isna(r.get("prob")) else round(float(r.get("prob")) * 100),
-            "Quota": r.get("quota"), "Risultato": ris, "Esito": esito,
+            "Risultato": ris, "Esito (vecchio)": esito,
+            "Pronostico ragionato": merc_rag or "—",
+            "Score rag.": (int(r.get("score_ragionato"))
+                           if "score_ragionato" in pron.columns and not pd.isna(r.get("score_ragionato"))
+                           else None),
+            "Esito ragionato": esito_rag,
         })
 
     giocati = vinti + persi
-    if giocati:
-        c = st.columns(3)
-        c[0].metric("Pronostici giocati", giocati)
-        c[1].metric("Vinti", vinti)
-        c[2].metric("Percentuale", f"{vinti/giocati*100:.0f}%")
+    giocati_rag = vinti_rag + persi_rag
+    st.markdown("**Confronto tra i due metodi**")
+    c = st.columns(2)
+    with c[0]:
+        st.caption("📐 Metodo vecchio (Elo/Poisson)")
+        if giocati:
+            cc = st.columns(2)
+            cc[0].metric("Giocati", giocati)
+            cc[1].metric("Riuscita", f"{vinti/giocati*100:.0f}%")
+        else:
+            st.caption("Nessun pronostico ancora concluso.")
+    with c[1]:
+        st.caption("🧠 Metodo ragionato")
+        if giocati_rag:
+            cc = st.columns(2)
+            cc[0].metric("Giocati", giocati_rag)
+            cc[1].metric("Riuscita", f"{vinti_rag/giocati_rag*100:.0f}%")
+        else:
+            st.caption("Nessun pronostico ragionato ancora concluso (si popola d'ora in avanti).")
     if aperti:
         st.caption(f"{aperti} in attesa di risultato.")
 
