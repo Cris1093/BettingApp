@@ -364,12 +364,30 @@ def partite_per_export(df):
 #  DB PARTITE
 # =============================================================================
 @st.cache_data(ttl=600, show_spinner=False)
+def _fetch_tutte(cli, tabella, order_col="data", desc=True):
+    """Scarica TUTTE le righe di una tabella superando il limite di 1000 di Supabase,
+    con paginazione a blocchi. Senza questo, le righe più vecchie sparivano."""
+    righe = []
+    step = 1000
+    start = 0
+    while True:
+        q = cli.table(tabella).select("*")
+        if order_col:
+            q = q.order(order_col, desc=desc)
+        res = q.range(start, start + step - 1).execute()
+        batch = res.data or []
+        righe.extend(batch)
+        if len(batch) < step:
+            break
+        start += step
+    return righe
+
+
 def carica_partite():
     cli = get_client()
     if not cli:
         return pd.DataFrame()
-    res = cli.table("partite").select("*").order("data", desc=True).execute()
-    df = pd.DataFrame(res.data or [])
+    df = pd.DataFrame(_fetch_tutte(cli, "partite", "data", True))
     if not df.empty and "data" in df:
         df["data"] = pd.to_datetime(df["data"]).dt.date
     return df
@@ -578,8 +596,7 @@ def carica_pronostici():
     cli = get_client()
     if not cli:
         return pd.DataFrame()
-    res = cli.table("pronostici").select("*").order("creato_il", desc=True).execute()
-    return pd.DataFrame(res.data or [])
+    return pd.DataFrame(_fetch_tutte(cli, "pronostici", "creato_il", True))
 
 
 def completa_risultati_pronostici():
@@ -3470,6 +3487,35 @@ def pagina_storico_pronostici(user):
                 "'💾 Salva questo pronostico'.")
         return
 
+    # dataframe partite per (ri)calcolare il pronostico ragionato dove manca
+    df_tutte = carica_partite()
+
+    def _ragionato_di(r):
+        """Pronostico ragionato: usa quello salvato, altrimenti lo ricalcola pre-partita."""
+        merc = _txt(r.get("mercato_ragionato")) if "mercato_ragionato" in pron.columns else ""
+        score = (r.get("score_ragionato")
+                 if "score_ragionato" in pron.columns else None)
+        if merc:
+            return merc, (int(score) if score is not None and not pd.isna(score) else None)
+        # ricalcolo al volo (deterministico, filtrato per data)
+        try:
+            pid = _txt(r.get("partita_id"))
+            data_p = r.get("data")
+            comp = None
+            if pid and not df_tutte.empty and "id" in df_tutte.columns:
+                mrow = df_tutte[df_tutte["id"].astype(str) == pid]
+                if not mrow.empty:
+                    comp = _label_da_comp(mrow.iloc[0].get("competizione"), carica_competizioni())
+            racc_r = analisi_ragionata(df_tutte, r.get("squadra_casa"), r.get("squadra_trasferta"),
+                                       data_partita=data_p, escludi_id=(pid or None),
+                                       competizione=comp)
+            if racc_r and racc_r.get("pronostico"):
+                return (racc_r["pronostico"].get("mercato") or "",
+                        racc_r["pronostico"].get("score"))
+        except Exception:
+            pass
+        return "", None
+
     righe = []
     vinti = persi = aperti = 0
     vinti_rag = persi_rag = 0
@@ -3477,7 +3523,7 @@ def pagina_storico_pronostici(user):
         gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
         esito = ""
         esito_rag = ""
-        merc_rag = _txt(r.get("mercato_ragionato")) if "mercato_ragionato" in pron.columns else ""
+        merc_rag, score_rag = _ragionato_di(r)
         if gc is not None and gt is not None and not (pd.isna(gc) or pd.isna(gt)):
             ris = f"{int(gc)}-{int(gt)}"
             won = _pronostico_vinto(r.get("mercato") or "", gc, gt)
@@ -3489,7 +3535,6 @@ def pagina_storico_pronostici(user):
                 persi += 1
             else:
                 esito = "—"
-            # esito del metodo ragionato
             if merc_rag:
                 won_r = _pronostico_vinto(merc_rag, gc, gt)
                 if won_r is True:
@@ -3510,9 +3555,7 @@ def pagina_storico_pronostici(user):
             "Conf.": None if pd.isna(r.get("confidence")) else int(r.get("confidence")),
             "Risultato": ris, "Esito (vecchio)": esito,
             "Pronostico ragionato": merc_rag or "—",
-            "Score rag.": (int(r.get("score_ragionato"))
-                           if "score_ragionato" in pron.columns and not pd.isna(r.get("score_ragionato"))
-                           else None),
+            "Score rag.": int(score_rag) if score_rag is not None and not pd.isna(score_rag) else None,
             "Esito ragionato": esito_rag,
         })
 
