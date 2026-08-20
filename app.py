@@ -693,6 +693,27 @@ def _txt(v):
     return str(v).strip()
 
 
+def _codici_mancanti(df, comp_df):
+    """Ritorna i codici competizione presenti nelle partite estratte ma NON ancora
+    mappati nell'anagrafica competizioni."""
+    if df is None or df.empty or "competizione" not in df.columns:
+        return []
+    presenti = set()
+    if comp_df is not None and not comp_df.empty:
+        for _, c in comp_df.iterrows():
+            presenti |= _chiavi_competizione(c)
+    mancanti = []
+    visti = set()
+    for cod in df["competizione"]:
+        c = _txt(cod)
+        if not c or _key(c) in visti:
+            continue
+        visti.add(_key(c))
+        if _key(c) not in presenti:
+            mancanti.append(c)
+    return mancanti
+
+
 def label_competizione(nome_lungo, nazione):
     """Etichetta leggibile: 'Nome | NAZIONE'."""
     nl = _txt(nome_lungo)
@@ -992,6 +1013,60 @@ def pagina_estrattore(user):
 
     st.success(f"Riconosciute **{len(df)}** partite uniche"
                + (f" · {team1} (casa) vs {team2} (trasferta)" if team1 and team2 else ""))
+
+    # --- Campionati mancanti dall'anagrafica: segnalali e falli compilare al volo ---
+    comp_df_estr = carica_competizioni()
+    mancanti = _codici_mancanti(df, comp_df_estr)
+    if mancanti:
+        st.warning(f"⚠️ {len(mancanti)} campionato/i non ancora in anagrafica: "
+                   f"{', '.join(mancanti)}. Compilali qui sotto: verranno salvati in "
+                   "Configurazione e usati subito dal motore.")
+        tab_nuovi = pd.DataFrame({
+            "Nome corto": mancanti,                       # autocompilato dal codice mancante
+            "Nome lungo": ["" for _ in mancanti],
+            "Nazione": ["" for _ in mancanti],
+            "Categoria": ["Campionato" for _ in mancanti],
+            "Livello": [pd.NA for _ in mancanti],
+        })
+        ed_nuovi = st.data_editor(
+            tab_nuovi, use_container_width=True, hide_index=True, key="editor_comp_mancanti",
+            column_config={
+                "Nome corto": st.column_config.TextColumn(
+                    "Nome corto", help="Codice riconosciuto dal testo (già compilato)."),
+                "Categoria": st.column_config.SelectboxColumn("Categoria", options=CATEGORIE),
+                "Livello": st.column_config.NumberColumn(
+                    "Livello", min_value=1, step=1,
+                    help="1 = prima divisione, 2 = seconda… (per amichevoli/coppe lascia vuoto)."),
+            })
+        if st.button("💾 Salva campionati mancanti", type="primary", key="salva_comp_mancanti"):
+            recs = []
+            for _, rr in ed_nuovi.iterrows():
+                corto = _txt(rr["Nome corto"])
+                if not corto:
+                    continue
+                liv = rr["Livello"]
+                rec = {
+                    "nome_corto": corto,
+                    "nome_lungo": _txt(rr["Nome lungo"]) or None,
+                    "nazione": _txt(rr["Nazione"]) or None,
+                    "categoria": _txt(rr["Categoria"]) or "Non assegnata",
+                }
+                try:
+                    if liv is not None and not pd.isna(liv):
+                        rec["livello"] = int(liv)
+                except (TypeError, ValueError):
+                    pass
+                recs.append(rec)
+            if recs:
+                try:
+                    upsert_competizioni(recs)
+                    st.success(f"Salvati {len(recs)} campionati. Ora compaiono in Configurazione "
+                               "e sono usati dal motore.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Errore nel salvataggio: {e}")
+            else:
+                st.info("Nessun campionato da salvare.")
 
     # tabella modificabile
     vista = pd.DataFrame({
