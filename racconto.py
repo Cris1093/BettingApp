@@ -275,15 +275,18 @@ def _pronostico(signal, ev):
 
 # ------------------------------------------------------------------------ entry
 def _distribuzione_gol(home_name, away_name, ev):
-    """Mostra quante volte ciascuna squadra ha fatto/subito esattamente N gol."""
+    """Mostra quante VOLTE (n/totale) ciascuna squadra ha fatto/subito esattamente N gol."""
     def riga(nome, sq):
         dfs = sq.get("dist_fs", {})
         if not dfs:
             return None
+        tot = sq.get("generale", {}).get("n", 0)
+        if not tot:
+            return None
         fatti = dfs.get("fatti", {})
         subiti = dfs.get("subiti", {})
-        ff = ", ".join(f"{g} gol {v['pct']:.0f}%" for g, v in list(fatti.items())[:5])
-        ss = ", ".join(f"{g} gol {v['pct']:.0f}%" for g, v in list(subiti.items())[:5])
+        ff = ", ".join(f"{g} gol {v['n']}/{tot}" for g, v in sorted(fatti.items()))
+        ss = ", ".join(f"{g} gol {v['n']}/{tot}" for g, v in sorted(subiti.items()))
         return f"{nome} — fatti: {ff or 'n/d'}; subiti: {ss or 'n/d'}."
     righe = [r for r in (riga(home_name, ev["home"]), riga(away_name, ev["away"])) if r]
     return {"titolo": "Distribuzione gol (fatti / subiti)", "righe": righe} if righe else None
