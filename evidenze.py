@@ -240,24 +240,82 @@ def implicita(quota):
 
 
 def analizza_quote(odds, variazioni=None):
-    """Probabilità implicite GREZZE (1/quota) + movimento quota, per ogni mercato."""
+    """Probabilità implicite del mercato per ogni mercato:
+    - market_prob_raw = 1/quota (grezza, include il margine del bookmaker)
+    - market_prob_novig = depurata dal margine (normalizzata sul gruppo completo)
+    Più il movimento quota. NON tocca la probabilità del modello (regola 7)."""
     odds = odds or {}
     variazioni = variazioni or {}
-    out = {}
+    # gruppi che formano un evento completo (per togliere il margine)
+    gruppi = [("1", "X", "2"), ("over25", "under25"), ("goal", "nogoal")]
+    raw = {}
     for k, q in odds.items():
         imp = implicita(q)
+        if imp is not None:
+            raw[k] = imp
+    # no-vig: normalizza ogni gruppo completo a somma 100
+    novig = {}
+    margine = {}
+    for g in gruppi:
+        presenti = [k for k in g if k in raw]
+        s = sum(raw[k] for k in presenti)
+        if len(presenti) == len(g) and s > 0:
+            for k in presenti:
+                novig[k] = _r2(raw[k] / s * 100.0)
+                margine[k] = _r2(s - 100.0)      # overround del gruppo (in punti %)
+    out = {}
+    for k, q in odds.items():
+        imp = raw.get(k)
         if imp is None:
             continue
         mv = None
         var = variazioni.get(k)
         try:
             if var is not None:
-                iniziale = float(q) - float(var)   # var = attuale - iniziale
+                iniziale = float(q) - float(var)
                 if iniziale > 0:
                     mv = _r2((float(q) - iniziale) / iniziale * 100.0)
         except (TypeError, ValueError):
             mv = None
-        out[k] = {"quota": _r2(float(q)), "implicita": imp, "movimento_pct": mv}
+        out[k] = {"quota": _r2(float(q)),
+                  "implicita": imp,                         # retrocompatibilità (= raw)
+                  "market_prob_raw": imp,
+                  "market_prob_novig": novig.get(k),
+                  "margine_gruppo": margine.get(k),
+                  "movimento_pct": mv}
+    return out
+
+
+def calcola_value(prob, quote):
+    """Value ECONOMICO per ogni mercato, tenuto SEPARATO dalla probabilità del modello.
+    Usa la probabilità del modello (prob) e il mercato (quote). Espone:
+    fair_odds, edge_raw, edge_novig, EV. Il metro principale è edge_novig / EV.
+    NB: affidabile solo quanto è accurata la probabilità del modello (value TEORICO
+    finché non calibrato su dati reali)."""
+    mappa = {"Over 2.5": "over25", "Under 2.5": "under25", "Goal": "goal", "No Goal": "nogoal",
+             "1": "1", "X": "X", "2": "2"}   # doppie chance: di norma senza quota
+    out = {}
+    for mercato, p in (prob or {}).items():
+        qk = mappa.get(mercato, mercato)
+        q = quote.get(qk) if quote else None
+        if not q:
+            continue
+        quota = q.get("quota")
+        raw = q.get("market_prob_raw")
+        nov = q.get("market_prob_novig")
+        pf = p / 100.0
+        fair = _r2(100.0 / p) if p > 0 else None
+        ev = _r2(pf * float(quota) - 1.0) if quota else None
+        out[mercato] = {
+            "prob_modello": p,
+            "fair_odds": fair,
+            "quota": quota,
+            "market_prob_raw": raw,
+            "market_prob_novig": nov,
+            "edge_raw": _r2(p - raw) if raw is not None else None,
+            "edge_novig": _r2(p - nov) if nov is not None else None,
+            "EV": ev,
+        }
     return out
 
 
@@ -368,21 +426,46 @@ def _prob_1x2(home, away, hcap_home=1.0, hcap_away=1.0):
     return _r2(p1 / s * 100), _r2(x / s * 100), _r2(p2 / s * 100)
 
 
+def _n_effective(partite):
+    """Dimensione EFFETTIVA del campione dopo i pesi (contesto). n_raw resta il numero
+    reale di partite; n_effective è la somma dei pesi (amichevoli/categorie inferiori
+    contano meno). Usata per penalizzare la qualità statistica in modo onesto."""
+    if not partite:
+        return 0.0
+    return round(sum(p.get("peso", 1.0) for p in partite), 1)
+
+
+def convergenza_recente(home, away):
+    """Convergenza calcolata SOLO sulle ultime 5 di ciascuna squadra: serve a rilevare
+    se il recente diverge dallo storico (allerta di instabilità, non verità assoluta)."""
+    def blocco_rec(sq):
+        return {"generale": sq["recenti5"], "split": sq["recenti5"]}
+    return convergenze(blocco_rec(home), blocco_rec(away))
+
+
 def costruisci_evidenze(partite_home, partite_away, odds=None, variazioni=None,
                         hcap_home=1.0, hcap_away=1.0):
-    """Punto d'ingresso: costruisce l'intero quadro di evidenze per la partita."""
+    """Punto d'ingresso: costruisce l'intero quadro di evidenze per la partita.
+    Separazione netta: 'prob' = modello, 'quote' = mercato (raw+novig), 'value' =
+    convenienza economica (edge/EV). La probabilità NON è mai toccata dal mercato."""
     home = analizza_squadra(partite_home, "casa")
     away = analizza_squadra(partite_away, "trasf")
     home["dist_fs"] = _dist_fatti_subiti(partite_home)
     away["dist_fs"] = _dist_fatti_subiti(partite_away)
+    prob = probabilita_coerenti(home, away, hcap_home, hcap_away)
+    quote = analizza_quote(odds, variazioni)
     return {
         "home": home,
         "away": away,
-        "convergenze": convergenze(home, away),
+        "convergenze": convergenze(home, away),          # convergenza STORICA
+        "convergenze_recenti": convergenza_recente(home, away),
         "contraddizioni": contraddizioni(home, "Casa") + contraddizioni(away, "Trasferta"),
-        "quote": analizza_quote(odds, variazioni),
-        "prob": probabilita_coerenti(home, away, hcap_home, hcap_away),
+        "quote": quote,
+        "prob": prob,                                    # probabilità del MODELLO
+        "value": calcola_value(prob, quote),             # convenienza vs mercato (separata)
         "hcap_home": hcap_home, "hcap_away": hcap_away,
         "n_home": home["generale"].get("n", 0),
         "n_away": away["generale"].get("n", 0),
+        "n_eff_home": _n_effective(partite_home),
+        "n_eff_away": _n_effective(partite_away),
     }
