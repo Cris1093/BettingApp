@@ -3131,7 +3131,7 @@ def render_racconto_st(racc):
         st.info("Analisi ragionata non disponibile (storico insufficiente).")
         return
     pron = racc["pronostico"]
-    colore = COL["win"] if pron["score"] >= 68 else (COL["draw"] if pron["score"] >= 45 else COL["loss"])
+    colore = COL["win"] if pron["score"] >= 55 else (COL["draw"] if pron["score"] >= 40 else COL["loss"])
     st.html(
         f'<div style="{FONT}max-width:560px;background:{COL["panel"]};border:1px solid {COL["line"]};'
         f'border-left:4px solid {colore};border-radius:14px;padding:16px;margin-bottom:6px;">'

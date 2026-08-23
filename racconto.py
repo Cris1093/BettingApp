@@ -215,7 +215,7 @@ def _contraddizioni_rischi(ev, signal):
 def _migliori_mercati(signal):
     righe_top, righe_evita = [], []
     for m in signal[:6]:
-        if m["score"] >= 45:
+        if m["score"] >= 28:
             val = ""
             if m.get("EV") is not None:
                 if m["EV"] >= 0.05:
@@ -270,11 +270,23 @@ def _risultati_esatti(home_name, away_name, ev, signal):
     return {"titolo": "Risultati esatti compatibili", "righe": righe}
 
 
+def _tier(score):
+    """Etichetta di affidabilità onesta calibrata sulla scala compressa attuale."""
+    if score >= 55:
+        return "forte"
+    if score >= 40:
+        return "moderato"
+    if score >= 28:
+        return "debole"
+    return "molto debole"
+
+
 def _due_selezioni(signal, ev):
     """Due selezioni finali distinte (studio, punto 18):
     - best_prediction: il segnale statisticamente più affidabile (robustezza + prob);
     - best_value_bet: la migliore opportunità per EV/edge (value TEORICO finché non calibrato).
-    """
+    Diamo SEMPRE il pronostico migliore con un'etichetta di affidabilità, invece di
+    rifiutarci: sarà l'affidabilità (forte/moderato/debole) a guidare la scelta."""
     if not signal:
         return {"best_prediction": None, "best_value_bet": None,
                 "testo": "Dati insufficienti per un pronostico."}
@@ -289,17 +301,20 @@ def _due_selezioni(signal, ev):
     best_val = None
     if con_ev:
         cand_val = sorted(con_ev, key=lambda m: -m["EV"])
-        if cand_val and cand_val[0]["EV"] > 0.03 and cand_val[0]["score"] >= 35:
+        if cand_val and cand_val[0]["EV"] > 0.03 and cand_val[0]["score"] >= 28:
             best_val = cand_val[0]
 
-    # testo del pronostico principale (sicurezza prima del valore)
-    if best_pred["score"] < 45:
-        testo = ("Nessun mercato presenta un supporto statistico sufficiente: "
-                 "partita da evitare o da seguire solo con estrema prudenza.")
+    tier = _tier(best_pred["score"])
+    qp = f" @ {best_pred['quota']}" if best_pred.get("quota") else ""
+    if best_pred["score"] < 28:
+        testo = (f"{_stelle(best_pred['score'])} {best_pred['mercato']}{qp} — "
+                 f"segnale {tier} ({best_pred['score']}/100): partita difficile da leggere, "
+                 f"prendere con prudenza.")
     else:
-        qp = f" @ {best_pred['quota']}" if best_pred.get("quota") else ""
-        testo = f"{_stelle(best_pred['score'])} {best_pred['mercato']}{qp} — signal {best_pred['score']}/100"
-    return {"best_prediction": best_pred, "best_value_bet": best_val, "testo": testo}
+        testo = (f"{_stelle(best_pred['score'])} {best_pred['mercato']}{qp} — "
+                 f"signal {best_pred['score']}/100 (affidabilità: {tier})")
+    return {"best_prediction": best_pred, "best_value_bet": best_val, "testo": testo,
+            "tier": tier}
 
 
 def _sezione_selezioni(sel):
@@ -307,11 +322,12 @@ def _sezione_selezioni(sel):
     righe = []
     bp = sel.get("best_prediction")
     bv = sel.get("best_value_bet")
-    if bp and bp["score"] >= 45:
+    if bp:
         q = f" @ {bp['quota']}" if bp.get("quota") else ""
         ev = f" · EV {bp['EV']:+.2f}" if bp.get("EV") is not None else ""
+        tier = sel.get("tier", "")
         righe.append(f"🎯 Più affidabile (best prediction): {bp['mercato']}{q} — "
-                     f"signal {bp['score']}/100, prob {_p(bp['stat'])}{ev}.")
+                     f"signal {bp['score']}/100 [{tier}], prob {_p(bp['stat'])}{ev}.")
     if bv:
         q = f" @ {bv['quota']}" if bv.get("quota") else ""
         righe.append(f"💰 Miglior value (best value bet): {bv['mercato']}{q} — "
@@ -322,7 +338,7 @@ def _sezione_selezioni(sel):
         righe.append("Nota: il mercato più sicuro e quello con più valore sono diversi — "
                      "scelta secondo il tuo obiettivo (sicurezza o convenienza).")
     if not righe:
-        righe.append("Nessuna selezione con supporto sufficiente.")
+        righe.append("Nessuna selezione disponibile.")
     return {"titolo": "Selezioni finali", "righe": righe}
 
 
@@ -330,9 +346,8 @@ def _pronostico(signal, ev):
     """Compat: ritorna il best_prediction come 'pronostico' principale."""
     sel = _due_selezioni(signal, ev)
     bp = sel.get("best_prediction")
-    if not bp or bp["score"] < 45:
-        return {"testo": sel["testo"], "mercato": None, "score": bp["score"] if bp else 0,
-                "selezioni": sel}
+    if not bp:
+        return {"testo": sel["testo"], "mercato": None, "score": 0, "selezioni": sel}
     return {"testo": sel["testo"], "mercato": bp["mercato"], "score": bp["score"],
             "selezioni": sel}
 
