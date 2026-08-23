@@ -24,6 +24,7 @@ import analisi
 import evidenze
 import segnali
 import racconto
+import statistico
 import backtest as bt
 
 import pandas as pd
@@ -2588,6 +2589,31 @@ def render_lista(team, matches, venue):
 # =============================================================================
 #  PAGINA: CONFIGURAZIONE
 # =============================================================================
+def salva_backtest_snapshot(n_valutate, min_storico, metriche, nota=None):
+    cli = get_client()
+    if not cli:
+        return
+    cli.table("backtest_snapshot").insert({
+        "n_valutate": int(n_valutate),
+        "min_storico": int(min_storico),
+        "metriche_json": json.dumps(metriche),
+        "nota": nota or None,
+    }).execute()
+    st.cache_data.clear()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def carica_backtest_snapshot():
+    cli = get_client()
+    if not cli:
+        return pd.DataFrame()
+    try:
+        res = cli.table("backtest_snapshot").select("*").order("creato_il", desc=True).execute()
+        return pd.DataFrame(res.data or [])
+    except Exception:
+        return pd.DataFrame()
+
+
 def _backtest_una_partita(df, comp_df, riga):
     """Ricostruisce la probabilità pre-partita per UNA partita conclusa, usando solo i
     dati precedenti (walk-forward). Ritorna dict {mercato: prob 0..1} o None."""
@@ -2622,6 +2648,27 @@ def pagina_backtest(user):
     comp_df = carica_competizioni()
     concluse = df[df["gol_casa"].notna() & df["gol_trasferta"].notna()].copy()
     st.markdown(f"Partite concluse nel database: **{len(concluse)}**")
+
+    # --- diario di bordo: andamento dei backtest salvati nel tempo ---
+    snap = carica_backtest_snapshot()
+    if not snap.empty:
+        with st.expander(f"📔 Diario di bordo ({len(snap)} snapshot salvati)", expanded=False):
+            righe = []
+            for _, s in snap.iterrows():
+                try:
+                    mj = json.loads(s.get("metriche_json") or "{}")
+                except Exception:
+                    mj = {}
+                battuti = sum(1 for v in mj.values() if v.get("batte_baseline"))
+                brier_medio = ([v["brier"] for v in mj.values() if v.get("brier") is not None])
+                bm = round(sum(brier_medio) / len(brier_medio), 4) if brier_medio else None
+                data_s = str(s.get("creato_il", ""))[:16].replace("T", " ")
+                righe.append({"Data": data_s, "N valutate": s.get("n_valutate"),
+                              "Mercati che battono baseline": f"{battuti}/{len(mj)}",
+                              "Brier medio": bm, "Nota": s.get("nota") or ""})
+            st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
+            st.caption("Con più snapshot nel tempo vedrai se il motore migliora: Brier medio "
+                       "in calo e più mercati che battono il baseline = progresso reale.")
 
     c = st.columns(2)
     min_storico = c[0].slider("Storico minimo per squadra", 5, 15, 8,
@@ -2683,21 +2730,37 @@ def pagina_backtest(user):
                "meglio del predire sempre la frequenza media. Errore calib.: quanto le "
                "probabilità dichiarate corrispondono alla realtà (0 = perfetto).")
     tab = []
+    metriche_snap = {}
     for m in bt.MERCATI_BINARI:
         c = dati[m]
         if not c:
             continue
         br = bt.brier(c)
         base = bt.baseline_brier(c)
+        ll = bt.log_loss(c)
+        ce = bt.calibration_error(c)
         tab.append({
             "Mercato": m, "N": len(c),
             "Brier": round(br, 4),
             "Baseline": round(base, 4),
             "Batte baseline": "✅" if br < base else "❌",
-            "Log Loss": round(bt.log_loss(c), 4),
-            "Errore calib.": bt.calibration_error(c),
+            "Log Loss": round(ll, 4),
+            "Errore calib.": ce,
         })
+        metriche_snap[m] = {"n": len(c), "brier": round(br, 4), "baseline": round(base, 4),
+                            "log_loss": round(ll, 4), "calib_err": ce,
+                            "batte_baseline": bool(br < base)}
     st.dataframe(pd.DataFrame(tab), use_container_width=True, hide_index=True)
+
+    # --- salva snapshot nel diario di bordo ---
+    with st.expander("💾 Salva questo risultato nel diario di bordo"):
+        nota = st.text_input("Nota (facoltativa)", placeholder="es. stato attuale, prima di correggere i λ")
+        if st.button("💾 Salva snapshot"):
+            try:
+                salva_backtest_snapshot(valutate, min_storico, metriche_snap, nota)
+                st.success("Snapshot salvato: potrai confrontare i miglioramenti nel tempo.")
+            except Exception as e:
+                st.error(f"Salvataggio non riuscito (hai creato la tabella backtest_snapshot?): {e}")
 
     # ---- CALIBRAZIONE dettagliata per mercato ----
     st.subheader("Curva di calibrazione")
@@ -3110,7 +3173,8 @@ def analisi_ragionata(df, home, away, data_partita=None, odds=None, variazioni=N
     ev["peso_info"] = {"home": _riepilogo_pesi(ph, hcap_h),
                        "away": _riepilogo_pesi(pa, hcap_a)}
     sig = segnali.calcola_signal(ev)
-    return racconto.racconta(home, away, ev, sig, competizione=competizione)
+    stat = statistico.analizza(ph, pa)     # motore statistico (conteggi grezzi)
+    return racconto.racconta(home, away, ev, sig, competizione=competizione, statistico=stat)
 
 
 def _riepilogo_pesi(partite, hcap):
@@ -3141,7 +3205,8 @@ def render_racconto_st(racc):
         f'{_esc(pron["testo"])}</div></div>')
     for sez in racc["sezioni"]:
         with st.expander(sez["titolo"], expanded=sez["titolo"] in
-                         ("Selezioni finali", "Migliori mercati (per robustezza)")):
+                         ("🏆 Pronostici fusi (motore + statistico)", "Selezioni finali",
+                          "📊 Motore statistico (eventi più frequenti)")):
             for r in sez["righe"]:
                 st.markdown(f"- {r}")
 

@@ -128,3 +128,14 @@ create table if not exists competizioni (
 -- chiave anon, oppure — meglio — usare la SERVICE ROLE key nei secrets di
 -- Streamlit (lato server, non esposta al browser).
 -- =====================================================================
+
+-- Diario di bordo del backtest: uno snapshot delle metriche a ogni esecuzione salvata,
+-- per tracciare i miglioramenti del motore nel tempo.
+create table if not exists backtest_snapshot (
+    id            uuid primary key default gen_random_uuid(),
+    creato_il     timestamptz default now(),
+    n_valutate    int,               -- partite valutate nel backtest
+    min_storico   int,               -- soglia storico usata
+    metriche_json text,              -- Brier/baseline/logloss/calib per mercato (JSON)
+    nota          text               -- nota libera (es. "dopo correzione lambda")
+);
