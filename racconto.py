@@ -330,8 +330,9 @@ def _sezione_selezioni(sel):
                      f"signal {bp['score']}/100 [{tier}], prob {_p(bp['stat'])}{ev}.")
     if bv:
         q = f" @ {bv['quota']}" if bv.get("quota") else ""
+        edge = f", edge no-vig {bv['edge_novig']:+.0f}pt" if bv.get("edge_novig") is not None else ""
         righe.append(f"💰 Miglior value (best value bet): {bv['mercato']}{q} — "
-                     f"EV {bv['EV']:+.2f}, edge no-vig {bv['edge_novig']:+.0f}pt "
+                     f"EV {bv['EV']:+.2f}{edge} "
                      f"(signal {bv['score']}/100). Value teorico: affidabile quanto la "
                      f"probabilità del modello.")
     if bp and bv and bp["mercato"] != bv["mercato"]:
@@ -460,7 +461,94 @@ def _fusione_sezione(ev):
     return {"titolo": "Fusione dei due motori (λ e sotto-stime)", "righe": righe}
 
 
-def racconta(home_name, away_name, ev, signal, competizione=None):
+def _sezione_statistico(stat):
+    """Output del MOTORE STATISTICO: eventi forti con confidence (conteggi grezzi)."""
+    if not stat or not stat.get("forti"):
+        return {"titolo": "📊 Motore statistico (eventi più frequenti)",
+                "righe": ["Nessun evento statisticamente forte e stabile trovato."]}
+    righe = []
+    for f in stat["forti"][:8]:
+        ph_ = f["casa"][2]
+        pa_ = f["trasf"][2]
+        righe.append(f"[{f['confidence']}] {f['pronostico']} ({f['tipologia']}): "
+                     f"casa {f['casa'][0]}/{f['casa'][1]} ({ph_:.0f}%) · "
+                     f"trasf {f['trasf'][0]}/{f['trasf'][1]} ({pa_:.0f}%) · "
+                     f"somma {f['somma'][0]}/{f['somma'][1]} ({f['somma_pct']:.0f}%).")
+    return {"titolo": "📊 Motore statistico (eventi più frequenti)", "righe": righe}
+
+
+def _tabella_statistica(stat):
+    """Tabella completa degli eventi (per chi vuole vedere tutto)."""
+    if not stat or not stat.get("tabella"):
+        return None
+    righe = []
+    for r in stat["tabella"]:
+        c, t, s = r["casa"], r["trasf"], r["somma"]
+        cp = f"{c[2]:.0f}%" if c[2] is not None else "n/d"
+        tp = f"{t[2]:.0f}%" if t[2] is not None else "n/d"
+        sp = f"{s[2]:.0f}%" if s[2] is not None else "n/d"
+        righe.append(f"{r['pronostico']} ({r['tipologia']}): "
+                     f"casa {c[0]}/{c[1]} {cp} · trasf {t[0]}/{t[1]} {tp} · somma {s[0]}/{s[1]} {sp}.")
+    return {"titolo": "📋 Tabella statistica completa", "righe": righe}
+
+
+# mercati che i due motori hanno in comune (per la fusione)
+_MAP_STAT_MOTORE = {"1": "1", "X": "X", "2": "2", "1X": "1X", "X2": "X2", "12": "12",
+                    "Over 2.5": "Over 2.5", "Under 2.5": "Under 2.5",
+                    "Goal": "Goal", "No Goal": "No Goal"}
+
+
+def fondi_due_motori(signal, stat):
+    """FUSIONE FINALE: eventi su cui MOTORE (signal) e STATISTICO (frequenze) concordano.
+    Sono i pronostici più sicuri, perché confermati da due metodi indipendenti."""
+    if not signal or not stat:
+        return []
+    sig_by = {m["mercato"]: m for m in signal}
+    # eventi forti dello statistico, ridotti ai mercati comuni col motore
+    stat_forti = {}
+    for f in stat.get("forti", []):
+        nome = _MAP_STAT_MOTORE.get(f["pronostico"])
+        if nome and nome not in stat_forti:
+            stat_forti[nome] = f
+    fusi = []
+    for nome, f in stat_forti.items():
+        m = sig_by.get(nome)
+        if not m:
+            continue
+        # il motore deve dare un minimo di supporto (signal) e prob dalla parte giusta
+        if m["score"] < 28 or (m.get("stat") is not None and m["stat"] < 50):
+            continue
+        # confidence combinata: media tra confidence statistica e signal normalizzato
+        conf_stat = {"alta": 90, "media": 70, "bassa": 50}.get(f["confidence"], 50)
+        conf_mot = m["score"]
+        conf_fusa = round((conf_stat + conf_mot) / 2)
+        fusi.append({"mercato": nome, "signal": m["score"], "prob": m.get("stat"),
+                     "stat_somma": f["somma_pct"], "conf_stat": f["confidence"],
+                     "confidence": conf_fusa, "quota": m.get("quota"), "EV": m.get("EV")})
+    fusi.sort(key=lambda x: -x["confidence"])
+    return fusi
+
+
+def _sezione_fusione_finale(signal, stat):
+    """I pronostici più sicuri: dove motore e statistico concordano."""
+    fusi = fondi_due_motori(signal, stat)
+    if not fusi:
+        return {"titolo": "🏆 Pronostici fusi (motore + statistico)",
+                "righe": ["Nessun evento confermato da entrambi i motori: partita incerta, "
+                          "meglio astenersi o puntare solo sul singolo motore più forte."]}
+    righe = []
+    for x in fusi[:4]:
+        q = f" @ {x['quota']}" if x.get("quota") else ""
+        ev = f" · EV {x['EV']:+.2f}" if x.get("EV") is not None else ""
+        righe.append(f"⭐ {x['mercato']}{q} — confidence {x['confidence']}/100 "
+                     f"(motore signal {x['signal']}, statistico {x['stat_somma']:.0f}% "
+                     f"[{x['conf_stat']}]){ev}.")
+    righe.append("Questi sono i pronostici più sicuri: confermati sia dal motore "
+                 "probabilistico sia da quello statistico (due metodi indipendenti).")
+    return {"titolo": "🏆 Pronostici fusi (motore + statistico)", "righe": righe}
+
+
+def racconta(home_name, away_name, ev, signal, competizione=None, statistico=None):
     sezioni = []
     coppa = _contesto_coppa(competizione)
     if coppa:
@@ -496,5 +584,16 @@ def racconta(home_name, away_name, ev, signal, competizione=None):
     sezioni.append(_risultati_esatti(home_name, away_name, ev, signal))
     pron = _pronostico(signal, ev)
     sezioni.append(_sezione_selezioni(pron.get("selezioni", {})))
+    # === TERZO OUTPUT: motore statistico + fusione dei due motori ===
+    if statistico:
+        sezioni.append(_sezione_statistico(statistico))
+        sezioni.append(_sezione_fusione_finale(signal, statistico))
+        tab = _tabella_statistica(statistico)
+        if tab:
+            sezioni.append(tab)
+    fusi = fondi_due_motori(signal, statistico) if statistico else []
     return {"home": home_name, "away": away_name, "sezioni": sezioni,
-            "pronostico": pron, "signal": signal}
+            "pronostico": pron, "signal": signal,
+            "statistico": statistico,
+            "pronostico_statistico": (statistico.get("best") if statistico else None),
+            "pronostici_fusi": fusi}
