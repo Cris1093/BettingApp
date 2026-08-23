@@ -444,15 +444,34 @@ def convergenza_recente(home, away):
 
 
 def costruisci_evidenze(partite_home, partite_away, odds=None, variazioni=None,
-                        hcap_home=1.0, hcap_away=1.0):
+                        hcap_home=1.0, hcap_away=1.0, w_freq=None, w_pois=None):
     """Punto d'ingresso: costruisce l'intero quadro di evidenze per la partita.
-    Separazione netta: 'prob' = modello, 'quote' = mercato (raw+novig), 'value' =
-    convenienza economica (edge/EV). La probabilità NON è mai toccata dal mercato."""
+    Separazione netta: 'prob' = modello (FUSO frequenze+Poisson), 'quote' = mercato
+    (raw+novig), 'value' = convenienza economica (edge/EV). La probabilità NON è mai
+    toccata dal mercato."""
     home = analizza_squadra(partite_home, "casa")
     away = analizza_squadra(partite_away, "trasf")
     home["dist_fs"] = _dist_fatti_subiti(partite_home)
     away["dist_fs"] = _dist_fatti_subiti(partite_away)
-    prob = probabilita_coerenti(home, away, hcap_home, hcap_away)
+
+    # 1) probabilità a FREQUENZE (motore ragionato)
+    prob_freq = probabilita_coerenti(home, away, hcap_home, hcap_away)
+    # 2) FUSIONE con Poisson/Elo (motore statistico). Se fallisce, resta la frequenza.
+    fus_det = None
+    prob = prob_freq
+    try:
+        import fusione
+        kw = {}
+        if w_freq is not None:
+            kw["w_freq"] = w_freq
+        if w_pois is not None:
+            kw["w_pois"] = w_pois
+        prob_fusa, fus_det = fusione.fondi(prob_freq, home, away, hcap_home, hcap_away, **kw)
+        if prob_fusa:
+            prob = prob_fusa
+    except Exception:
+        fus_det = None
+
     quote = analizza_quote(odds, variazioni)
     return {
         "home": home,
@@ -461,7 +480,10 @@ def costruisci_evidenze(partite_home, partite_away, odds=None, variazioni=None,
         "convergenze_recenti": convergenza_recente(home, away),
         "contraddizioni": contraddizioni(home, "Casa") + contraddizioni(away, "Trasferta"),
         "quote": quote,
-        "prob": prob,                                    # probabilità del MODELLO
+        "prob": prob,                                    # probabilità del MODELLO (fusa)
+        "prob_freq": prob_freq,                          # sotto-stima: frequenze
+        "prob_poisson": (fus_det or {}).get("prob_poisson"),   # sotto-stima: Poisson
+        "fusione": fus_det,                              # λ, risultati Poisson, pesi
         "value": calcola_value(prob, quote),             # convenienza vs mercato (separata)
         "hcap_home": hcap_home, "hcap_away": hcap_away,
         "n_home": home["generale"].get("n", 0),

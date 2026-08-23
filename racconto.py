@@ -143,20 +143,26 @@ def _serie_attive(home_name, away_name, ev):
 
 
 def _mercati_sezione(signal, ev):
-    """Sezioni Over/Under, Goal/NoGoal e 1X2 con i dati chiave."""
+    """Sezioni Over/Under, Goal/NoGoal e 1X2. Signal = robustezza; a fianco EV/edge (value)."""
     by = {m["mercato"]: m for m in signal}
 
     def riga(nome):
         m = by.get(nome)
         if not m:
             return None
-        q = f"quota {m['quota']} (implicita {_p(m['implicita'])})" if m.get("quota") else "quota n/d"
-        mv = ""
-        if m.get("movimento") is not None:
-            verso = "in calo" if m["movimento"] < 0 else "in rialzo"
-            mv = f", quota {verso} {m['movimento']:+.0f}%"
-        stat = f"statistica {_p(m['stat'])} · " if m.get("stat") is not None else ""
-        return f"{nome}: signal {m['score']}/100 · {stat}{q}{mv}."
+        stat = f"prob {_p(m['stat'])} · " if m.get("stat") is not None else ""
+        if m.get("quota"):
+            q = f"quota {m['quota']}"
+            if m.get("market_prob_novig") is not None:
+                q += f" (no-vig {_p(m['market_prob_novig'])})"
+            val = ""
+            if m.get("EV") is not None:
+                val = f" · EV {m['EV']:+.2f}"
+                if m.get("edge_novig") is not None:
+                    val += f", edge {m['edge_novig']:+.0f}pt"
+        else:
+            q, val = "quota n/d", ""
+        return f"{nome}: signal {m['score']}/100 · {stat}{q}{val}."
 
     ou = [r for r in (riga("Over 2.5"), riga("Under 2.5")) if r]
     gg = [r for r in (riga("Goal"), riga("No Goal")) if r]
@@ -178,22 +184,29 @@ def _quote_sezione(ev):
     for k, lab in etich.items():
         if k in ev["quote"]:
             q = ev["quote"][k]
+            nv = f" · no-vig {_p(q['market_prob_novig'])}" if q.get("market_prob_novig") is not None else ""
             mv = ""
             if q.get("movimento_pct") is not None:
                 mv = f" · movimento {q['movimento_pct']:+.0f}%"
-            righe.append(f"{lab}: quota {q['quota']} → implicita {_p(q['implicita'])}{mv}")
+            righe.append(f"{lab}: quota {q['quota']} → implicita {_p(q['implicita'])}{nv}{mv}")
     if not righe:
         righe.append("Nessuna quota fornita.")
-    return {"titolo": "Quote e probabilità implicite", "righe": righe}
+    return {"titolo": "Quote e probabilità implicite (raw + no-vig)", "righe": righe}
 
 
 def _contraddizioni_rischi(ev, signal):
     righe = list(ev["contraddizioni"])
-    if min(ev["n_home"], ev["n_away"]) < 10:
-        righe.append("Campione ridotto: confidenza complessiva ridotta.")
+    if min(ev.get("n_eff_home", ev["n_home"]), ev.get("n_eff_away", ev["n_away"])) < 10:
+        righe.append("Campione effettivo ridotto: confidenza complessiva ridotta.")
     top = signal[0] if signal else None
     if top and top["score"] < 55:
         righe.append("Nessun mercato ha un supporto statistico forte: partita difficile da leggere.")
+    # allerta instabilità: componente instabilità presente in qualche mercato di testa
+    for m in signal[:4]:
+        for nome, val, det in m.get("componenti", []):
+            if nome == "instabilità":
+                righe.append(f"{m['mercato']}: {det} — segnale instabile, confidenza ridotta.")
+                break
     if not righe:
         righe.append("Nessuna contraddizione rilevante tra i campioni.")
     return {"titolo": "Contraddizioni e rischi", "righe": righe}
@@ -204,29 +217,36 @@ def _migliori_mercati(signal):
     for m in signal[:6]:
         if m["score"] >= 45:
             val = ""
-            if m.get("implicita") is not None and m.get("stat") is not None:
-                d = m["stat"] - m["implicita"]
-                if d >= 6:
-                    val = " — potenziale valore"
-                elif d <= -8:
-                    val = " — quota che svaluta"
+            if m.get("EV") is not None:
+                if m["EV"] >= 0.05:
+                    val = f" — value positivo (EV {m['EV']:+.2f})"
+                elif m["EV"] <= -0.10:
+                    val = f" — value negativo (EV {m['EV']:+.2f})"
             q = f" @ {m['quota']}" if m.get("quota") else ""
             righe_top.append(f"{_stelle(m['score'])} {m['mercato']}{q} "
                              f"(signal {m['score']}/100){val}")
-    # mercati da evitare: quota bassa ma poco supporto, o statistica contro
+    # mercati da evitare: quota compressa (no-vig alta) ma statistica bassa
     for m in signal:
-        if m.get("quota") and m.get("implicita") is not None and m.get("stat") is not None:
-            if m["implicita"] >= 55 and m["stat"] < m["implicita"] - 8 and m["score"] < 45:
+        nov = m.get("market_prob_novig")
+        if m.get("quota") and nov is not None and m.get("stat") is not None:
+            if nov >= 55 and m["stat"] < nov - 10 and m["score"] < 45:
                 righe_evita.append(f"{m['mercato']} @ {m['quota']}: quota compressa "
-                                   f"(implica {_p(m['implicita'])}) ma statistica solo {_p(m['stat'])}.")
-    sez = [{"titolo": "Migliori mercati", "righe": righe_top or ["Nessun mercato con supporto sufficiente."]}]
+                                   f"(no-vig {_p(nov)}) ma statistica solo {_p(m['stat'])}.")
+    sez = [{"titolo": "Migliori mercati (per robustezza)",
+            "righe": righe_top or ["Nessun mercato con supporto sufficiente."]}]
     if righe_evita:
         sez.append({"titolo": "Mercati da evitare", "righe": righe_evita[:4]})
     return sez
 
 
 def _risultati_esatti(home_name, away_name, ev, signal):
-    """Risultati compatibili con i pattern (gol più frequenti per squadra + tendenza gol)."""
+    """Risultati compatibili: preferisce quelli di Poisson (dai gol attesi), altrimenti
+    li stima dai gol più frequenti."""
+    fus = ev.get("fusione") or {}
+    ris_pois = fus.get("risultati_poisson")
+    if ris_pois:
+        righe = [f"{home_name} {r['risultato']} {away_name}" for r in ris_pois[:4]]
+        return {"titolo": "Risultati esatti compatibili", "righe": righe}
     h, a = ev["home"], ev["away"]
     # gol più probabili per la squadra di casa (dallo split casa) e ospite (split trasf)
     def top_gol(blocco, fallback):
@@ -250,27 +270,71 @@ def _risultati_esatti(home_name, away_name, ev, signal):
     return {"titolo": "Risultati esatti compatibili", "righe": righe}
 
 
-def _pronostico(signal, ev):
+def _due_selezioni(signal, ev):
+    """Due selezioni finali distinte (studio, punto 18):
+    - best_prediction: il segnale statisticamente più affidabile (robustezza + prob);
+    - best_value_bet: la migliore opportunità per EV/edge (value TEORICO finché non calibrato).
+    """
     if not signal:
-        return {"testo": "Dati insufficienti per un pronostico.", "mercato": None, "score": 0}
-    # il "12" (no pareggio) è sicuro ma non è un titolo sensato: non lo si headline
-    candidati = [m for m in signal if m["mercato"] != "12"]
-    top = candidati[0] if candidati else signal[0]
-    # regola d'oro: se nessun mercato è forte, dillo
-    if top["score"] < 45:
-        return {"testo": "Nessun mercato presenta un supporto statistico sufficiente: "
-                "partita da evitare o da seguire solo con estrema prudenza.",
-                "mercato": None, "score": top["score"]}
-    q = f" @ {top['quota']}" if top.get("quota") else ""
-    nota = ""
-    if top.get("implicita") is not None and top.get("stat") is not None:
-        d = top["stat"] - top["implicita"]
-        if top.get("quota") and float(top["quota"]) <= 1.45 and d < 6:
-            nota = " (molto probabile ma quota compressa: poco valore)"
-        elif d >= 6:
-            nota = " (con potenziale valore rispetto alla quota)"
-    return {"testo": f"{_stelle(top['score'])} {top['mercato']}{q} — signal {top['score']}/100{nota}",
-            "mercato": top["mercato"], "score": top["score"]}
+        return {"best_prediction": None, "best_value_bet": None,
+                "testo": "Dati insufficienti per un pronostico."}
+
+    # best_prediction: signal più alto, escludendo il "12" (no pareggio, non è un titolo)
+    cand_pred = [m for m in signal if m["mercato"] != "12"]
+    best_pred = cand_pred[0] if cand_pred else signal[0]
+
+    # best_value_bet: EV più alto tra i mercati con quota; deve essere positivo e
+    # avere un minimo di robustezza (evita value su segnali fragili)
+    con_ev = [m for m in signal if m.get("EV") is not None and m.get("quota")]
+    best_val = None
+    if con_ev:
+        cand_val = sorted(con_ev, key=lambda m: -m["EV"])
+        if cand_val and cand_val[0]["EV"] > 0.03 and cand_val[0]["score"] >= 35:
+            best_val = cand_val[0]
+
+    # testo del pronostico principale (sicurezza prima del valore)
+    if best_pred["score"] < 45:
+        testo = ("Nessun mercato presenta un supporto statistico sufficiente: "
+                 "partita da evitare o da seguire solo con estrema prudenza.")
+    else:
+        qp = f" @ {best_pred['quota']}" if best_pred.get("quota") else ""
+        testo = f"{_stelle(best_pred['score'])} {best_pred['mercato']}{qp} — signal {best_pred['score']}/100"
+    return {"best_prediction": best_pred, "best_value_bet": best_val, "testo": testo}
+
+
+def _sezione_selezioni(sel):
+    """Sezione che mostra le due selezioni in chiaro."""
+    righe = []
+    bp = sel.get("best_prediction")
+    bv = sel.get("best_value_bet")
+    if bp and bp["score"] >= 45:
+        q = f" @ {bp['quota']}" if bp.get("quota") else ""
+        ev = f" · EV {bp['EV']:+.2f}" if bp.get("EV") is not None else ""
+        righe.append(f"🎯 Più affidabile (best prediction): {bp['mercato']}{q} — "
+                     f"signal {bp['score']}/100, prob {_p(bp['stat'])}{ev}.")
+    if bv:
+        q = f" @ {bv['quota']}" if bv.get("quota") else ""
+        righe.append(f"💰 Miglior value (best value bet): {bv['mercato']}{q} — "
+                     f"EV {bv['EV']:+.2f}, edge no-vig {bv['edge_novig']:+.0f}pt "
+                     f"(signal {bv['score']}/100). Value teorico: affidabile quanto la "
+                     f"probabilità del modello.")
+    if bp and bv and bp["mercato"] != bv["mercato"]:
+        righe.append("Nota: il mercato più sicuro e quello con più valore sono diversi — "
+                     "scelta secondo il tuo obiettivo (sicurezza o convenienza).")
+    if not righe:
+        righe.append("Nessuna selezione con supporto sufficiente.")
+    return {"titolo": "Selezioni finali", "righe": righe}
+
+
+def _pronostico(signal, ev):
+    """Compat: ritorna il best_prediction come 'pronostico' principale."""
+    sel = _due_selezioni(signal, ev)
+    bp = sel.get("best_prediction")
+    if not bp or bp["score"] < 45:
+        return {"testo": sel["testo"], "mercato": None, "score": bp["score"] if bp else 0,
+                "selezioni": sel}
+    return {"testo": sel["testo"], "mercato": bp["mercato"], "score": bp["score"],
+            "selezioni": sel}
 
 
 # ------------------------------------------------------------------------ entry
@@ -364,6 +428,23 @@ def _peso_dati(home_name, away_name, ev):
     return {"titolo": "Peso dei dati (contesto)", "righe": righe}
 
 
+def _fusione_sezione(ev):
+    """Trasparenza: gol attesi e le due sotto-stime (frequenze vs Poisson) prima della fusione."""
+    fus = ev.get("fusione")
+    if not fus:
+        return None
+    righe = [f"Gol attesi (λ): casa {fus['lambda_home']:.2f} · trasferta {fus['lambda_away']:.2f}."]
+    pf = ev.get("prob_freq") or {}
+    pp = ev.get("prob_poisson") or {}
+    prob = ev.get("prob") or {}
+    for m in ("1", "X", "2", "Over 2.5", "Goal"):
+        if m in pf and m in pp:
+            righe.append(f"{m}: frequenze {pf[m]:.0f}% + Poisson {pp[m]:.0f}% → fusa {prob.get(m,0):.0f}%.")
+    w = f"{fus.get('w_freq',0.5):.2f}/{fus.get('w_pois',0.5):.2f}"
+    righe.append(f"Peso di fusione frequenze/Poisson: {w} (provvisorio, da ottimizzare col backtest).")
+    return {"titolo": "Fusione dei due motori (λ e sotto-stime)", "righe": righe}
+
+
 def racconta(home_name, away_name, ev, signal, competizione=None):
     sezioni = []
     coppa = _contesto_coppa(competizione)
@@ -384,6 +465,9 @@ def racconta(home_name, away_name, ev, signal, competizione=None):
         _convergenze(ev),
         _eventi_rari(home_name, away_name, ev),
     ])
+    fus = _fusione_sezione(ev)
+    if fus:
+        sezioni.append(fus)
     rag = _ragionamento_gol(home_name, away_name, ev)
     if rag:
         sezioni.append(rag)
@@ -396,5 +480,6 @@ def racconta(home_name, away_name, ev, signal, competizione=None):
     sezioni.extend(_migliori_mercati(signal))
     sezioni.append(_risultati_esatti(home_name, away_name, ev, signal))
     pron = _pronostico(signal, ev)
+    sezioni.append(_sezione_selezioni(pron.get("selezioni", {})))
     return {"home": home_name, "away": away_name, "sezioni": sezioni,
             "pronostico": pron, "signal": signal}

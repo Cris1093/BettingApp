@@ -24,6 +24,7 @@ import analisi
 import evidenze
 import segnali
 import racconto
+import backtest as bt
 
 import pandas as pd
 import streamlit as st
@@ -2587,6 +2588,160 @@ def render_lista(team, matches, venue):
 # =============================================================================
 #  PAGINA: CONFIGURAZIONE
 # =============================================================================
+def _backtest_una_partita(df, comp_df, riga):
+    """Ricostruisce la probabilità pre-partita per UNA partita conclusa, usando solo i
+    dati precedenti (walk-forward). Ritorna dict {mercato: prob 0..1} o None."""
+    home = riga["squadra_casa"]
+    away = riga["squadra_trasferta"]
+    data_p = riga["data"]
+    pid = riga.get("id")
+    t_liv = _livello_di(riga.get("competizione"), comp_df)
+    t_cat = categoria_di(riga.get("competizione"), comp_df)
+    t_key = _key(riga.get("competizione")) if riga.get("competizione") else None
+    ph = _partite_squadra_evidenze(df, home, data_p, pid, comp_df, t_liv, t_cat, t_key)
+    pa = _partite_squadra_evidenze(df, away, data_p, pid, comp_df, t_liv, t_cat, t_key)
+    if not ph or not pa:
+        return None
+    hcap_h = _handicap_livello(ph, t_liv)
+    hcap_a = _handicap_livello(pa, t_liv)
+    ev = evidenze.costruisci_evidenze(ph, pa, odds=None, hcap_home=hcap_h, hcap_away=hcap_a)
+    return ev["prob"], (len(ph), len(pa))
+
+
+def pagina_backtest(user):
+    st.title("🧪 Backtest walk-forward")
+    st.caption("Per ogni partita conclusa, il motore ricostruisce la probabilità pre-partita "
+               "usando SOLO i dati precedenti (niente informazioni dal futuro) e la confronta "
+               "con il risultato reale. Le metriche principali misurano la qualità delle "
+               "probabilità, indipendentemente dalle quote.")
+
+    df = carica_partite()
+    if df.empty:
+        st.info("Nessuna partita nel database.")
+        return
+    comp_df = carica_competizioni()
+    concluse = df[df["gol_casa"].notna() & df["gol_trasferta"].notna()].copy()
+    st.markdown(f"Partite concluse nel database: **{len(concluse)}**")
+
+    c = st.columns(2)
+    min_storico = c[0].slider("Storico minimo per squadra", 5, 15, 8,
+                              help="Valuta una partita solo se entrambe le squadre hanno "
+                                   "almeno questo numero di partite precedenti.")
+    max_part = c[1].slider("Max partite da valutare", 50, 1000, 300, step=50,
+                           help="Limita il calcolo (le più recenti). Più alto = più lento.")
+
+    if not st.button("▶️ Esegui backtest", type="primary"):
+        return
+
+    # ordina dalla più recente e limita
+    if "data" in concluse.columns:
+        concluse = concluse.sort_values("data", ascending=False)
+    concluse = concluse.head(max_part)
+
+    # raccogli (prob, esito) per mercato
+    dati = {m: [] for m in bt.MERCATI_BINARI}
+    scommesse = {m: [] for m in bt.MERCATI_BINARI}
+    valutate = saltate = 0
+    prog = st.progress(0.0, text="Ricostruzione pre-partita…")
+    righe = list(concluse.iterrows())
+    for i, (_, r) in enumerate(righe):
+        if i % 10 == 0:
+            prog.progress(i / max(1, len(righe)), text=f"Partita {i+1}/{len(righe)}…")
+        try:
+            gc, gt = int(r["gol_casa"]), int(r["gol_trasferta"])
+            res = _backtest_una_partita(df, comp_df, r)
+            if not res:
+                saltate += 1
+                continue
+            prob, (nh, na) = res
+            if min(nh, na) < min_storico:
+                saltate += 1
+                continue
+            valutate += 1
+            for m, (chiave, fesito) in bt.MERCATI_BINARI.items():
+                p = prob.get(chiave)
+                if p is None:
+                    continue
+                y = fesito(gc, gt)
+                dati[m].append((p / 100.0, y))
+                # ROI: solo dove esiste la quota storica salvata (se presente)
+                q = _quota_storica(r, chiave)
+                if q and p / 100.0 * q - 1 > 0:      # scommetti solo se il modello vede value
+                    scommesse[m].append((y, q))
+        except Exception:
+            saltate += 1
+    prog.progress(1.0, text="Completato.")
+
+    st.success(f"Valutate {valutate} partite · saltate {saltate} (storico insufficiente).")
+    if valutate == 0:
+        st.warning("Nessuna partita con storico sufficiente. Abbassa lo storico minimo.")
+        return
+
+    # ---- METRICHE QUALITÀ MODELLO (protagoniste) ----
+    st.subheader("Qualità delle probabilità (indipendente dalle quote)")
+    st.caption("Brier e Log Loss: più bassi è meglio. 'Batte baseline' = il modello è "
+               "meglio del predire sempre la frequenza media. Errore calib.: quanto le "
+               "probabilità dichiarate corrispondono alla realtà (0 = perfetto).")
+    tab = []
+    for m in bt.MERCATI_BINARI:
+        c = dati[m]
+        if not c:
+            continue
+        br = bt.brier(c)
+        base = bt.baseline_brier(c)
+        tab.append({
+            "Mercato": m, "N": len(c),
+            "Brier": round(br, 4),
+            "Baseline": round(base, 4),
+            "Batte baseline": "✅" if br < base else "❌",
+            "Log Loss": round(bt.log_loss(c), 4),
+            "Errore calib.": bt.calibration_error(c),
+        })
+    st.dataframe(pd.DataFrame(tab), use_container_width=True, hide_index=True)
+
+    # ---- CALIBRAZIONE dettagliata per mercato ----
+    st.subheader("Curva di calibrazione")
+    merc_sel = st.selectbox("Mercato", list(bt.MERCATI_BINARI.keys()))
+    cal = bt.calibration(dati[merc_sel], n_bin=5)
+    if cal:
+        cdf = pd.DataFrame(cal)
+        cdf.columns = ["Fascia prob.", "N", "Prob. media %", "Reale %", "Scarto pt"]
+        st.dataframe(cdf, use_container_width=True, hide_index=True)
+        st.caption("Se 'Prob. media' ≈ 'Reale', il modello è ben calibrato in quella fascia.")
+
+    # ---- ROI (secondario, solo dove ci sono quote) ----
+    st.subheader("Redditività (solo dove esistono quote storiche)")
+    tab_roi = []
+    for m in bt.MERCATI_BINARI:
+        r = bt.roi_yield(scommesse[m])
+        if r and r["n"] >= 5:
+            tab_roi.append({"Mercato": m, "Giocate (value)": r["n"],
+                            "Profitto (u)": r["profitto"], "ROI %": r["roi"],
+                            "Max drawdown (u)": r["max_drawdown"]})
+    if tab_roi:
+        st.dataframe(pd.DataFrame(tab_roi), use_container_width=True, hide_index=True)
+        st.caption("Simulazione: 1 unità sulle giocate dove il modello vede value (EV>0). "
+                   "Richiede quote storiche salvate: dove mancano, la partita conta solo per "
+                   "le metriche del modello.")
+    else:
+        st.caption("Poche o nessuna quota storica disponibile: la redditività non è "
+                   "calcolabile in modo affidabile. Le metriche del modello sopra restano valide.")
+
+
+def _quota_storica(riga, mercato):
+    """Quota salvata per un mercato, se presente (solo partite già analizzate come target)."""
+    m = {"Over 2.5": "quota_iniziale_over", "1": "quota_iniziale_1",
+         "X": "quota_iniziale_x", "2": "quota_iniziale_2", "Goal": "quota_iniziale_goal"}
+    col = m.get(mercato)
+    if not col or col not in riga:
+        return None
+    try:
+        q = float(riga[col])
+        return q if q > 1.0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def pagina_configurazione(user):
     st.header("⚙️ Configurazione")
 
@@ -2986,7 +3141,7 @@ def render_racconto_st(racc):
         f'{_esc(pron["testo"])}</div></div>')
     for sez in racc["sezioni"]:
         with st.expander(sez["titolo"], expanded=sez["titolo"] in
-                         ("Migliori mercati", "Pattern principali e convergenze")):
+                         ("Selezioni finali", "Migliori mercati (per robustezza)")):
             for r in sez["righe"]:
                 st.markdown(f"- {r}")
 
@@ -3629,7 +3784,7 @@ def main():
         st.markdown(f"**Utente:** {user['username']}  \n_ruolo: {user['ruolo']}_")
         pagina = st.radio("Menu", ["📥 Ultimi risultati e quote", "📊 Estrattore risultati",
                                    "🗓️ Estrattore pianificazione", "🔮 Analisi & Pronostico",
-                                   "📈 Storico pronostici",
+                                   "📈 Storico pronostici", "🧪 Backtest",
                                    "🗄️ Database", "⚙️ Configurazione"])
         if st.button("Esci"):
             st.session_state.pop("user", None)
@@ -3645,6 +3800,8 @@ def main():
         pagina_analisi(user)
     elif pagina.startswith("📈"):
         pagina_storico_pronostici(user)
+    elif pagina.startswith("🧪"):
+        pagina_backtest(user)
     elif pagina.startswith("🗄️"):
         pagina_database(user)
     else:
