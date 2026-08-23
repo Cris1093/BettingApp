@@ -3317,8 +3317,10 @@ def pagina_analisi(user):
         st.warning(f"Dati storici insufficienti ({a.get('n_home',0)} / {a.get('n_away',0)} partite).")
         return
 
-    # === NUOVA ANALISI RAGIONATA (evidenze + signal score + racconto) ===
-    st.subheader("🧠 Analisi ragionata")
+    # === ANALISI & PRONOSTICO (motore unico: frequenze + Poisson/Elo fusi) ===
+    st.subheader("🎯 Analisi & Pronostico")
+    st.caption("Motore unico: probabilità a frequenze e Poisson/Elo fuse in un'unica stima. "
+               "Signal = robustezza statistica; value (EV) = convenienza vs quota, separati.")
     comp_target = (_label_da_comp(row.get("competizione"), carica_competizioni())
                    if not pend.empty else None)
     racc = analisi_ragionata(df, home, away, data_partita=data_partita,
@@ -3327,140 +3329,10 @@ def pagina_analisi(user):
                              competizione=comp_target)
     render_racconto_st(racc)
 
-    st.divider()
-    st.subheader("📐 Analisi statistica (Elo / Poisson)")
-
+    # (motore fuso: la visualizzazione è la sola "Analisi ragionata" sopra;
+    #  qui teniamo solo i valori del vecchio motore per il salvataggio storico e la calibrazione)
     p = a["prob"]
-
-    # --- MIGLIOR PRONOSTICO (card) ---
     best = a["best"]
-    col = _col_conf(best["confidence"])
-    reasons = "".join(f'<div style="color:{COL["hi"]};font-size:13px;margin-top:3px;">✓ {_esc(x)}</div>'
-                      for x in a["reasons"]) or \
-        f'<div style="color:{COL["lo"]};font-size:13px;">—</div>'
-    risks = "".join(f'<div style="color:{COL["loss"]};font-size:13px;margin-top:3px;">⚠ {_esc(x)}</div>'
-                    for x in a["risks"]) or \
-        f'<div style="color:{COL["lo"]};font-size:13px;">nessun rischio rilevante</div>'
-    consenso = ""
-    if best.get("market_prob") is not None:
-        acol = {"basso": COL["draw"], "medio": "#e08a2b", "alto": COL["loss"]}.get(best.get("alert"))
-        base = (f'<div style="color:{COL["lo"]};font-size:12px;margin-top:10px;">'
-                f'Statistiche {best["prob"]*100:.0f}% · quota (grezza) {best["market_prob"]*100:.0f}%')
-        if best.get("alert") and acol:
-            base += (f' — <span style="color:{acol};font-weight:600;">alert {best["alert"]}</span>')
-        consenso = base + "</div>"
-    st.html(
-        f'<div style="{FONT}max-width:520px;background:{COL["panel"]};border:1px solid {COL["line"]};'
-        f'border-left:4px solid {col};border-radius:14px;padding:16px;">'
-        f'<div style="color:{COL["lo"]};font-size:11px;text-transform:uppercase;letter-spacing:.15em;">'
-        f'Miglior pronostico</div>'
-        f'<div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:4px;">'
-        f'<span style="color:{COL["hi"]};font-size:26px;font-weight:700;">{_esc(best["mercato"])}</span>'
-        f'<span style="color:{col};font-size:22px;font-weight:700;">{best["confidence"]:.0f}<span '
-        f'style="font-size:13px;color:{COL["lo"]};">/100</span></span></div>'
-        f'<div style="color:{COL["lo"]};font-size:12px;margin:6px 0 4px;">Forza segnali</div>'
-        f'{_barra(best["signal_ratio"]*100, col)}'
-        f'<div style="margin-top:12px;">{reasons}</div>'
-        f'<div style="margin-top:10px;">{risks}</div>{consenso}</div>')
-
-    # --- ragionamento ---
-    st.subheader("📋 Il ragionamento")
-    for b in a["motivazioni"]:
-        st.markdown(f"- {b}")
-    ft_h, ft_a = a.get("forme_tipo_home", []), a.get("forme_tipo_away", [])
-    if len(ft_h) > 1 or len(ft_a) > 1:
-        st.caption("Forma separata per tipo di competizione (dove ci sono abbastanza dati):")
-        def _riga_tipo(nome, ft):
-            parts = [f"{t['tipo']} {t['V']}V {t['N']}N {t['P']}P (Goal {t['goal']}/{t['n']})"
-                     for t in ft]
-            return f"**{nome}**: " + " · ".join(parts) if parts else ""
-        if len(ft_h) > 1:
-            st.markdown("- " + _riga_tipo(home, ft_h))
-        if len(ft_a) > 1:
-            st.markdown("- " + _riga_tipo(away, ft_a))
-
-    # --- probabilità ---
-    st.subheader("📈 Probabilità del modello")
-    if a.get("blended_mercato"):
-        st.caption(f"🔀 Probabilità **fuse col mercato** (peso {a['peso_mercato']:.0%}): le quote "
-                   "correggono lo storico dove serve (neopromosse, contesti anomali).")
-    if a.get("calibrato"):
-        st.caption("✅ Probabilità Over/Goal **calibrate** sui risultati storici del tuo database.")
-    cc = st.columns(3)
-    cc[0].metric(f"1 {home}", f'{p["1"]*100:.0f}%')
-    cc[1].metric("X", f'{p["X"]*100:.0f}%')
-    cc[2].metric(f"2 {away}", f'{p["2"]*100:.0f}%')
-    cc = st.columns(2)
-    d_over = a["over_prob"] - a.get("over_prob_raw", a["over_prob"])
-    d_goal = a["btts_prob"] - a.get("btts_prob_raw", a["btts_prob"])
-    cc[0].metric("Over 2.5", f'{a["over_prob"]*100:.0f}%',
-                 f'{d_over*100:+.0f} vs grezza' if abs(d_over) >= 0.005 else None)
-    cc[1].metric("Goal", f'{a["btts_prob"]*100:.0f}%',
-                 f'{d_goal*100:+.0f} vs grezza' if abs(d_goal) >= 0.005 else None)
-    st.caption(f'Gol attesi: {home} {p["lambda_home"]:.2f} · {away} {p["lambda_away"]:.2f} · '
-               f'Elo {a["elo"]["home"]:.0f} vs {a["elo"]["away"]:.0f}')
-
-    # --- risultato esatto (griglia coerente coi mercati) ---
-    with st.expander("🎲 Risultati esatti (per analisi)"):
-        if a.get("griglia_coerente"):
-            st.caption("Griglia adattata ai mercati 1X2/Over/Goal (i mercati non cambiano).")
-        st.markdown("**Più probabili:** " +
-                    " · ".join(f'{r["risultato"]} ({r["p"]*100:.0f}%)' for r in p["risultati"][:6]))
-        rpe = a.get("risultati_per_esito", {})
-        if rpe:
-            cc = st.columns(3)
-            for idx, (lab, nome) in enumerate([("1", f"Vince {home}"), ("X", "Pareggio"),
-                                               ("2", f"Vince {away}")]):
-                with cc[idx]:
-                    st.caption(nome)
-                    for r in rpe.get(lab, []):
-                        st.markdown(f'{r["risultato"]} · {r["p"]*100:.0f}%')
-
-    # --- alert quota (discrepanze statistiche vs bookmaker) ---
-    if a.get("alerts"):
-        st.subheader("🚨 Alert quota")
-        st.caption("Dove le statistiche e le quote (grezze) divergono: da controllare prima di giocare.")
-        acol = {"basso": COL["draw"], "medio": "#e08a2b", "alto": COL["loss"]}
-        rows = ""
-        for al in a["alerts"]:
-            col = acol.get(al["livello"], COL["lo"])
-            verso = "quota più alta" if (al["delta"] or 0) > 0 else "quota più bassa"
-            rows += (
-                f'<div style="{FONT}display:flex;justify-content:space-between;align-items:center;'
-                f'background:{COL["panel"]};border:1px solid {COL["line"]};border-left:4px solid {col};'
-                f'border-radius:10px;padding:8px 12px;margin-bottom:6px;max-width:520px;">'
-                f'<span style="color:{COL["hi"]};font-weight:600;">{_esc(al["mercato"])}</span>'
-                f'<span style="color:{COL["lo"]};font-size:12px;">stat {al["prob"]*100:.0f}% · '
-                f'quota {al["market_prob"]*100:.0f}% · '
-                f'<b style="color:{col};text-transform:uppercase;">{al["livello"]}</b> ({verso})</span></div>')
-        st.html(rows)
-
-    # --- tutti i mercati ordinati per confidence ---
-    st.subheader("🎯 Tutti i mercati")
-    acol = {"basso": COL["draw"], "medio": "#e08a2b", "alto": COL["loss"]}
-    cards = ""
-    for m in sorted(a["mercati"], key=lambda x: -x["confidence"]):
-        mk = ""
-        if m.get("market_prob") is not None:
-            q = f' @ {m["quota"]:.2f}' if m.get("quota") else ""
-            mk = f' · quota {m["market_prob"]*100:.0f}%{q}'
-            if m.get("alert"):
-                col = acol.get(m["alert"], COL["lo"])
-                mk += f' · <b style="color:{col};">⚠{m["alert"]}</b>'
-            if m.get("var_quota") and abs(m["var_quota"]) >= 0.05:
-                mk += f' · quota {"↓" if m["var_quota"]>0 else "↑"}'
-        elif m.get("quota"):
-            mk = f' · quota {m["quota"]:.2f}'
-        cards += (
-            f'<div style="{FONT}background:{COL["panel"]};border:1px solid {COL["line"]};'
-            f'border-radius:12px;padding:10px 14px;margin-bottom:7px;max-width:520px;">'
-            f'<div style="display:flex;justify-content:space-between;align-items:center;">'
-            f'<span style="color:{COL["hi"]};font-weight:600;">{_esc(m["mercato"])}</span>'
-            f'<span style="color:{COL["lo"]};font-size:12px;">conf '
-            f'<b style="color:{_col_conf(m["confidence"])};">{m["confidence"]:.0f}</b>/100 · '
-            f'stat {m["prob"]*100:.0f}%{mk}</span></div>'
-            f'<div style="margin-top:7px;">{_barra(m["confidence"], _col_conf(m["confidence"]))}</div></div>')
-    st.html(cards)
 
     # --- riepilogo (una volta) usato sia per la copia sia per lo storico ---
     testo = riepilogo_testo(a, df, home, away, odds,
