@@ -658,8 +658,89 @@ def _sezione_fusione_finale(signal, stat):
     return {"titolo": "🏆 Pronostici fusi (motore + statistico)", "righe": righe}
 
 
+def _classe_valore(ev_frac, edge):
+    """Classifica una giocata secondo la regola dell'utente (EV prima, edge conferma)."""
+    if ev_frac is None:
+        return None
+    ev_pct = ev_frac * 100
+    if ev_pct <= 0:
+        col, etich = "🔴", "non giocare"
+    elif ev_pct < 3:
+        col, etich = "🔴", "quasi sempre scarta"
+    elif ev_pct < 10:
+        col, etich = "🟡", "secondaria (valuta)"
+    else:
+        col, etich = "🟢", "principale (candidata)"
+    anomalia = ev_pct >= 20
+    if edge is None:
+        edge_txt = ""
+    elif edge >= 10:
+        edge_txt = "edge ottimo"
+    elif edge >= 5:
+        edge_txt = "edge interessante"
+    else:
+        edge_txt = "edge debole"
+    return {"col": col, "etichetta": etich, "ev_pct": ev_pct,
+            "anomalia": anomalia, "edge_txt": edge_txt}
+
+
+def selezione_valore(signal):
+    """Regola pratica di valore (EV → edge → signal). Ritorna (candidati ordinati, schedina)."""
+    cand = []
+    for m in signal:
+        ev = m.get("EV")
+        if ev is None or not m.get("quota"):
+            continue
+        cl = _classe_valore(ev, m.get("edge_novig"))
+        if not cl:
+            continue
+        cand.append({**m, "_cl": cl})
+    cand.sort(key=lambda x: (-(x["EV"] or 0), -(x.get("edge_novig") or -999), -x["score"]))
+    schedina = [c for c in cand if c["EV"] is not None and c["EV"] * 100 >= 10][:3]
+    return cand, schedina
+
+
+def _sezione_valore(signal):
+    """Sezione IN CIMA: le giocate di valore secondo la regola EV → edge → signal."""
+    cand, schedina = selezione_valore(signal)
+    if not cand:
+        return {"titolo": "💎 Giocate di valore (EV → edge → signal)",
+                "righe": ["Nessuna quota inserita: senza quote non è possibile calcolare "
+                          "EV/edge. Inserisci le quote per attivare la selezione di valore."]}
+    righe = []
+    best = cand[0]
+    clb = best["_cl"]
+    q = f" @ {best['quota']}" if best.get("quota") else ""
+    edge_b = f"{best['edge_novig']:+.0f}pt" if best.get("edge_novig") is not None else "n/d"
+    riga_best = (f"{clb['col']} MIGLIORE VALORE: {best['mercato']}{q} — "
+                 f"EV {clb['ev_pct']:+.0f}%, edge {edge_b}, signal {best['score']}")
+    if clb["anomalia"]:
+        riga_best += " ⚠️ EV molto alto: verifica che non sia un'anomalia del modello."
+    righe.append(riga_best)
+    righe.append("")
+    righe.append("Tutte le giocate per valore (dalla migliore):")
+    for c in cand:
+        cl = c["_cl"]
+        q = f" @ {c['quota']}" if c.get("quota") else ""
+        edge_c = f"{c['edge_novig']:+.0f}pt" if c.get("edge_novig") is not None else "n/d"
+        extra = " ⚠️ verifica anomalia" if cl["anomalia"] else ""
+        righe.append(f"  {cl['col']} {c['mercato']}{q}: EV {cl['ev_pct']:+.0f}% · "
+                     f"edge {edge_c} · signal {c['score']} — {cl['etichetta']}, {cl['edge_txt']}{extra}")
+    righe.append("")
+    if schedina:
+        nomi = ", ".join(f"{c['mercato']} @ {c['quota']}" for c in schedina)
+        righe.append(f"🎯 Schedina di valore (EV ≥ +10%): {nomi}")
+        righe.append("Ricorda: probabilità = quanto pensi succeda; quota = quanto ti pagano; "
+                     "EV = se il prezzo vale il rischio. Il valore, non la probabilità, guida la scelta.")
+    else:
+        righe.append("🎯 Nessuna giocata con EV ≥ +10%: nessuna candidata forte per valore.")
+    return {"titolo": "💎 Giocate di valore (EV → edge → signal)", "righe": righe}
+
+
 def racconta(home_name, away_name, ev, signal, competizione=None, statistico=None):
     sezioni = []
+    # 💎 GIOCATE DI VALORE — in cima a tutto (regola EV → edge → signal)
+    sezioni.append(_sezione_valore(signal))
     coppa = _contesto_coppa(competizione)
     if coppa:
         sezioni.append(coppa)
