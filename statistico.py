@@ -136,11 +136,20 @@ def tabella_eventi(ph, pa):
 
 
 def _evento_recente_stabile(partite, pred, k=5):
-    """True se l'evento si è verificato in TUTTE le ultime k partite (stabilità recente)."""
+    """Stabilità recente (regola utente):
+    - deve verificarsi in ENTRAMBE le 2 partite più recenti;
+    - può mancare al massimo UNA volta nelle ultime k (5).
+    """
     rec = partite[:k]
-    if len(rec) < k:
+    if len(rec) < 2:
         return True   # troppo pochi dati recenti: non blocco
-    return all(pred(p) for p in rec)
+    # le 2 più recenti devono averlo entrambe
+    due = partite[:2]
+    if not all(pred(p) for p in due):
+        return False
+    # al massimo 1 assenza nelle ultime k
+    assenze = sum(1 for p in rec if not pred(p))
+    return assenze <= 1
 
 
 # per il filtro di stabilità recente serve rimappare il nome evento -> predicato
@@ -216,13 +225,26 @@ def eventi_forti(righe, ph, pa):
     return forti
 
 
+def classifica(righe):
+    """Classifica di TUTTI gli eventi ordinati per % somma (dal più alto). Ritorna una
+    lista di dict pronti per la visualizzazione."""
+    valide = [r for r in righe if r["somma"][2] is not None]
+    valide.sort(key=lambda r: (-r["somma"][2], -(r["somma"][1] or 0)))
+    out = []
+    for r in valide:
+        s = r["somma"]
+        out.append({"pronostico": r["pronostico"], "tipologia": r["tipologia"],
+                    "n": s[0], "tot": s[1], "pct": s[2]})
+    return out
+
+
 def analizza(ph, pa):
-    """Punto d'ingresso: tabella completa + eventi forti con confidence."""
+    """Punto d'ingresso: tabella completa + eventi forti + classifica per % somma."""
     righe = tabella_eventi(ph, pa)
     forti = eventi_forti(righe, ph, pa)
-    # miglior evento statistico = il primo forte (se c'è)
     best = forti[0] if forti else None
-    return {"tabella": righe, "forti": forti, "best": best}
+    return {"tabella": righe, "forti": forti, "best": best,
+            "classifica": classifica(righe)}
 
 
 def esito_evento(nome, gc, gt):

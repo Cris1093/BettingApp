@@ -3350,8 +3350,9 @@ def render_racconto_st(racc):
         f'{_esc(pron["testo"])}</div></div>')
     for sez in racc["sezioni"]:
         with st.expander(sez["titolo"], expanded=sez["titolo"] in
-                         ("🏆 Pronostici fusi (motore + statistico)", "Selezioni finali",
-                          "📊 Motore statistico (eventi più frequenti)")):
+                         ("⭐ Top 5 pronostici più sicuri (confidence combinata)",
+                          "🔀 Motore vs Statistico (validazione)",
+                          "🏆 Pronostici fusi (motore + statistico)")):
             for r in sez["righe"]:
                 st.markdown(f"- {r}")
 

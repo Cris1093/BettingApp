@@ -477,6 +477,102 @@ def _sezione_statistico(stat):
     return {"titolo": "📊 Motore statistico (eventi più frequenti)", "righe": righe}
 
 
+def valida_incrociato(signal, stat):
+    """Confronto MOTORE vs STATISTICO mercato per mercato.
+    - tabella (idea A+C): per ogni mercato prob motore, % statistico e SEMAFORO
+      (🟢 validato / 🟡 debole / 🔴 discordante);
+    - top5 (idea B): i 5 pronostici più sicuri con confidence 'boostata' dall'accordo.
+    """
+    if not signal or not stat:
+        return {"tabella": [], "top5": []}
+    sig_by = {m["mercato"]: m for m in signal}
+    # mercato motore -> nome evento statistico (variante generale)
+    stat_gen = {}
+    for r in stat.get("tabella", []):
+        if r["tipologia"] != "generale":
+            continue
+        nome_mot = _MAP_STAT_MOTORE.get(r["pronostico"])
+        if nome_mot and nome_mot not in stat_gen:
+            stat_gen[nome_mot] = r["somma"][2]   # % somma
+
+    ordine = ["1", "X", "2", "1X", "X2", "12", "Over 2.5", "Under 2.5", "Goal", "No Goal"]
+    tabella, valutati = [], []
+    for merc in ordine:
+        m = sig_by.get(merc)
+        if not m:
+            continue
+        prob = m.get("stat")           # prob del motore
+        signalscore = m.get("score", 0)
+        statpct = stat_gen.get(merc)   # % statistico
+        # semaforo: solo se il motore considera probabile il mercato (prob>=50)
+        semaforo = "—"
+        giudizio = "—"
+        if prob is not None and prob >= 50 and statpct is not None:
+            if statpct >= 65:
+                semaforo, giudizio = "🟢", "validato"
+            elif statpct >= 50:
+                semaforo, giudizio = "🟡", "debole"
+            else:
+                semaforo, giudizio = "🔴", "discordante"
+        tabella.append({"mercato": merc, "prob_motore": prob, "signal": signalscore,
+                        "stat_pct": statpct, "semaforo": semaforo, "giudizio": giudizio,
+                        "quota": m.get("quota"), "EV": m.get("EV")})
+        # confidence boostata (idea B): solo mercati che il motore considera (prob>=50)
+        if prob is not None and prob >= 50 and statpct is not None:
+            combined = 0.5 * signalscore + 0.5 * statpct
+            if giudizio == "validato":
+                combined += 10
+            elif giudizio == "discordante":
+                combined -= 20
+            combined = max(0, min(100, round(combined)))
+            valutati.append({"mercato": merc, "confidence": combined,
+                             "prob_motore": prob, "signal": signalscore,
+                             "stat_pct": statpct, "semaforo": semaforo,
+                             "quota": m.get("quota"), "EV": m.get("EV")})
+    valutati.sort(key=lambda x: -x["confidence"])
+    return {"tabella": tabella, "top5": valutati[:5]}
+
+
+def _sezione_validazione(signal, stat):
+    """Tabella A+C: motore vs statistico con semaforo."""
+    vi = valida_incrociato(signal, stat)
+    if not vi["tabella"]:
+        return None, vi
+    righe = []
+    for r in vi["tabella"]:
+        pm = f"{r['prob_motore']:.0f}%" if r["prob_motore"] is not None else "n/d"
+        sp = f"{r['stat_pct']:.0f}%" if r["stat_pct"] is not None else "n/d"
+        righe.append(f"{r['semaforo']} {r['mercato']}: motore {pm} (signal {r['signal']}) "
+                     f"· statistico {sp} — {r['giudizio']}")
+    return {"titolo": "🔀 Motore vs Statistico (validazione)", "righe": righe}, vi
+
+
+def _sezione_top5(vi):
+    """Idea B: i 5 pronostici più sicuri con confidence boostata dall'accordo."""
+    if not vi or not vi.get("top5"):
+        return None
+    righe = []
+    for i, x in enumerate(vi["top5"], 1):
+        q = f" @ {x['quota']}" if x.get("quota") else ""
+        ev = f" · EV {x['EV']:+.2f}" if x.get("EV") is not None else ""
+        righe.append(f"{i}. {x['semaforo']} {x['mercato']}{q} — confidence {x['confidence']}/100 "
+                     f"(motore {x['prob_motore']:.0f}%, statistico {x['stat_pct']:.0f}%){ev}")
+    righe.append("Confidence potenziata quando motore e statistico concordano, ridotta quando "
+                 "discordano. Sono i pronostici più sicuri secondo entrambi.")
+    return {"titolo": "⭐ Top 5 pronostici più sicuri (confidence combinata)", "righe": righe}
+
+
+def _sezione_classifica(stat):
+    """Classifica degli eventi ordinati per % (somma), dal più alto."""
+    if not stat or not stat.get("classifica"):
+        return None
+    righe = []
+    for i, r in enumerate(stat["classifica"], 1):
+        righe.append(f"{i} - {r['pronostico']} ({r['tipologia']}) - "
+                     f"{r['n']}/{r['tot']} {r['pct']:.0f}%")
+    return {"titolo": "🏅 Classifica statistica (per %)", "righe": righe}
+
+
 def _tabella_statistica(stat):
     """Tabella completa degli eventi (per chi vuole vedere tutto)."""
     if not stat or not stat.get("tabella"):
@@ -597,6 +693,16 @@ def racconta(home_name, away_name, ev, signal, competizione=None, statistico=Non
     if statistico:
         sezioni.append(_sezione_statistico(statistico))
         sezioni.append(_sezione_fusione_finale(signal, statistico))
+        # validazione incrociata (A+C) + top 5 con confidence combinata (B)
+        sez_val, vi = _sezione_validazione(signal, statistico)
+        if sez_val:
+            sezioni.append(sez_val)
+        top5 = _sezione_top5(vi)
+        if top5:
+            sezioni.append(top5)
+        clas = _sezione_classifica(statistico)
+        if clas:
+            sezioni.append(clas)
         tab = _tabella_statistica(statistico)
         if tab:
             sezioni.append(tab)
