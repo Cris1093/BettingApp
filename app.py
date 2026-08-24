@@ -2647,6 +2647,89 @@ def _backtest_una_partita(df, comp_df, riga):
     return ev["prob"], (len(ph), len(pa)), tre
 
 
+def _report_backtest_testo(valutate, saltate, min_storico, tab, tab_tre, cal_sel, merc_sel, tab_roi):
+    """Costruisce un riepilogo TESTUALE del backtest (per copia-incolla rapido)."""
+    L = []
+    L.append(f"BACKTEST — {datetime.now():%Y-%m-%d %H:%M}")
+    L.append(f"Valutate {valutate} partite · saltate {saltate} · storico minimo {min_storico}")
+    L.append("")
+    L.append("QUALITÀ PROBABILITÀ (Brier più basso = meglio; batte baseline = utile):")
+    for r in tab:
+        L.append(f"  {r['Mercato']:10s} N={r['N']:4d}  Brier {r['Brier']:.4f}  "
+                 f"baseline {r['Baseline']:.4f}  {r['Batte baseline']}  "
+                 f"LogLoss {r['Log Loss']:.4f}  calibErr {r['Errore calib.']}")
+    L.append("")
+    L.append("CONFRONTO TRE MOTORI (hit-rate pronostico di punta):")
+    for r in tab_tre:
+        L.append(f"  {r['Motore']:14s} valutati {r['Pronostici valutati']:4d}  "
+                 f"azzeccati {r['Azzeccati']:4d}  riuscita {r['Riuscita %']}%")
+    L.append("")
+    L.append(f"CALIBRAZIONE ({merc_sel}):")
+    for r in cal_sel:
+        L.append(f"  fascia {r['fascia']:8s} N={r['n']:4d}  prob media {r['prob_media']}%  "
+                 f"reale {r['reale']}%  scarto {r['scarto']}pt")
+    if tab_roi:
+        L.append("")
+        L.append("REDDITIVITÀ (dove ci sono quote):")
+        for r in tab_roi:
+            L.append(f"  {r['Mercato']:10s} giocate {r['Giocate (value)']:4d}  "
+                     f"profitto {r['Profitto (u)']}u  ROI {r['ROI %']}%  "
+                     f"maxDD {r['Max drawdown (u)']}u")
+    return "\n".join(L)
+
+
+def _report_backtest_pdf(valutate, saltate, min_storico, tab, tab_tre, cal_sel, merc_sel, tab_roi):
+    """Genera il PDF del backtest in memoria (BytesIO)."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from io import BytesIO
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=36, bottomMargin=36,
+                            leftMargin=36, rightMargin=36)
+    ss = getSampleStyleSheet()
+    story = [Paragraph("Backtest — Estrattore Partite", ss["Title"]),
+             Paragraph(f"{datetime.now():%d/%m/%Y %H:%M} · Valutate {valutate} · "
+                       f"saltate {saltate} · storico minimo {min_storico}", ss["Normal"]),
+             Spacer(1, 12)]
+
+    def _tabella(titolo, intest, righe):
+        story.append(Paragraph(titolo, ss["Heading2"]))
+        dati = [intest] + righe
+        t = Table(dati, hAlign="LEFT")
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f2f2")]),
+        ]))
+        story.append(t)
+        story.append(Spacer(1, 12))
+
+    _tabella("Qualità delle probabilità",
+             ["Mercato", "N", "Brier", "Baseline", "Batte", "LogLoss", "CalibErr"],
+             [[r["Mercato"], r["N"], f"{r['Brier']:.4f}", f"{r['Baseline']:.4f}",
+               "Si" if "✅" in r["Batte baseline"] else "No",
+               f"{r['Log Loss']:.4f}", r["Errore calib."]] for r in tab])
+    _tabella("Confronto tra i tre motori",
+             ["Motore", "Valutati", "Azzeccati", "Riuscita %"],
+             [[r["Motore"].replace("🎯 ", "").replace("📊 ", "").replace("🏆 ", ""),
+               r["Pronostici valutati"], r["Azzeccati"], r["Riuscita %"]] for r in tab_tre])
+    _tabella(f"Calibrazione — {merc_sel}",
+             ["Fascia", "N", "Prob media %", "Reale %", "Scarto pt"],
+             [[r["fascia"], r["n"], r["prob_media"], r["reale"], r["scarto"]] for r in cal_sel])
+    if tab_roi:
+        _tabella("Redditività (dove ci sono quote)",
+                 ["Mercato", "Giocate", "Profitto u", "ROI %", "MaxDD u"],
+                 [[r["Mercato"], r["Giocate (value)"], r["Profitto (u)"],
+                   r["ROI %"], r["Max drawdown (u)"]] for r in tab_roi])
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue()
+
+
 def pagina_backtest(user):
     st.title("🧪 Backtest walk-forward")
     st.caption("Per ogni partita conclusa, il motore ricostruisce la probabilità pre-partita "
@@ -2839,6 +2922,24 @@ def pagina_backtest(user):
         st.caption("Poche o nessuna quota storica disponibile: la redditività non è "
                    "calcolabile in modo affidabile. Le metriche del modello sopra restano valide.")
 
+    # ---- ESPORTAZIONE: PDF + testo copiabile ----
+    st.divider()
+    st.subheader("📄 Esporta risultati")
+    testo = _report_backtest_testo(valutate, saltate, min_storico, tab, tab_tre, cal, merc_sel, tab_roi)
+    ce = st.columns(2)
+    try:
+        pdf_bytes = _report_backtest_pdf(valutate, saltate, min_storico, tab, tab_tre, cal, merc_sel, tab_roi)
+        ce[0].download_button("⬇️ Scarica PDF", pdf_bytes,
+                              file_name=f"backtest_{datetime.now():%Y%m%d_%H%M}.pdf",
+                              mime="application/pdf")
+    except Exception as e:
+        ce[0].caption(f"PDF non disponibile: {e}")
+    ce[1].download_button("⬇️ Scarica testo", testo.encode("utf-8"),
+                          file_name=f"backtest_{datetime.now():%Y%m%d_%H%M}.txt",
+                          mime="text/plain")
+    st.caption("Oppure copia direttamente da qui (clic sull'icona in alto a destra del riquadro):")
+    st.code(testo, language="text")
+
 
 def _quota_storica(riga, mercato):
     """Quota salvata per un mercato, se presente (solo partite già analizzate come target)."""
@@ -2896,24 +2997,19 @@ def pagina_configurazione(user):
             cdf = carica_competizioni()
             with st.spinner("Genero i documenti Word…"):
                 st.session_state["_docx_nuova"] = genera_docx_nuova_analisi(dfp, cdf)
-                st.session_state["_docx_vecchia"] = genera_docx_archivio(dfp, cdf, con_analisi=True)
                 st.session_state["_docx_senza"] = genera_docx_archivio(dfp, cdf, con_analisi=False)
             st.success("File pronti: usa i pulsanti di download qui sotto.")
         except Exception as e:
             st.error(f"Impossibile generare il Word: {e}")
     if st.session_state.get("_docx_nuova"):
-        ca = st.columns(3)
+        ca = st.columns(2)
         ca[0].download_button(
-            "⬇️ Partite nuova analisi", data=st.session_state["_docx_nuova"],
-            file_name="archivio_nuova_analisi.docx",
+            "⬇️ Partite con analisi", data=st.session_state["_docx_nuova"],
+            file_name="archivio_analisi.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            help="Solo la nuova analisi ragionata più i dati soliti delle partite.")
+            help="Il nuovo racconto: motore, statistico, fusione e i pronostici, più i dati "
+                 "delle partite.")
         ca[1].download_button(
-            "⬇️ Partite vecchia analisi", data=st.session_state["_docx_vecchia"],
-            file_name="archivio_partite_con_analisi.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            help="L'analisi statistica Elo/Poisson con tutti i mercati.")
-        ca[2].download_button(
             "⬇️ Partite senza analisi", data=st.session_state["_docx_senza"],
             file_name="archivio_partite.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
