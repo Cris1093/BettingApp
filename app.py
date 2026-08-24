@@ -3773,7 +3773,13 @@ def pagina_storico_pronostici(user):
             ris = f"{int(gc)}-{int(gt)}"
             for eng in ("motore", "statistico", "fusione"):
                 merc, conf = tre[eng]
-                won = _pronostico_vinto(_norm_merc(merc), gc, gt) if merc else None
+                if not merc:
+                    won = None
+                elif eng == "statistico":
+                    # eventi statistici hanno nomi lunghi: valutatore dedicato
+                    won = statistico.esito_evento(merc, int(gc), int(gt))
+                else:
+                    won = _pronostico_vinto(_norm_merc(merc), gc, gt)
                 if won is True:
                     cell[eng] = "✅"; conteggi[eng][0] += 1
                 elif won is False:
@@ -3831,7 +3837,9 @@ def pagina_storico_pronostici(user):
         tab, use_container_width=True, hide_index=True, key="editor_storico",
         column_config={
             "Risultato": st.column_config.TextColumn("Risultato", help="Es. 1-1, 2-0"),
-            "Competizione": st.column_config.SelectboxColumn("Competizione", options=comp_opts),
+            "Competizione": st.column_config.TextColumn(
+                "Competizione", help="Scrivi la competizione (es. Serie A Betano | Brasile). "
+                "Se esiste in anagrafica viene collegata, altrimenti salvata così com'è."),
             "Data": st.column_config.Column(disabled=True),
             "Casa": st.column_config.Column(disabled=True),
             "Trasferta": st.column_config.Column(disabled=True),
@@ -3866,10 +3874,21 @@ def pagina_storico_pronostici(user):
                     rec["gol_casa"] = gc_new
                     rec["gol_trasferta"] = gt_new
                     cambia = True
-            # competizione
+            # competizione: risolvi al codice se combacia con l'anagrafica, altrimenti testo
             comp_lab = _txt(edit.iloc[i].get("Competizione"))
-            if comp_lab and comp_lab in comp_code_by_label:
-                rec["competizione"] = comp_code_by_label[comp_lab]
+            comp_old_lab = _label_da_comp(comp_per_id.get(pid), comp_df_st) or ""
+            if comp_lab and comp_lab != comp_old_lab:
+                # prova a mappare l'etichetta o il nome a un codice noto
+                nuovo = comp_code_by_label.get(comp_lab)
+                if not nuovo:
+                    # prova match per chiave (nome lungo/corto/nazione)
+                    k = _key(comp_lab.split("|")[0])
+                    for _, c_ in (comp_df_st.iterrows() if comp_df_st is not None
+                                  and not comp_df_st.empty else []):
+                        if k in _chiavi_competizione(c_):
+                            nuovo = c_.get("nome_corto")
+                            break
+                rec["competizione"] = nuovo or comp_lab   # codice se noto, altrimenti testo
                 cambia = True
             if cambia:
                 recs.append(rec)

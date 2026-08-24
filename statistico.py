@@ -223,3 +223,45 @@ def analizza(ph, pa):
     # miglior evento statistico = il primo forte (se c'è)
     best = forti[0] if forti else None
     return {"tabella": righe, "forti": forti, "best": best}
+
+
+def esito_evento(nome, gc, gt):
+    """Valuta se un evento statistico (per nome) si è verificato, dato il risultato
+    gc-gt (dal punto di vista casa-trasferta). Ritorna True/False, o None se ignoto."""
+    if not nome:
+        return None
+    tot = gc + gt
+    n = nome.strip()
+    # esiti 1X2 e doppie chance
+    if n.startswith("1 (") or n == "1":
+        return gc > gt
+    if n.startswith("2 (") or n == "2":
+        return gc < gt
+    if n.startswith("X (") or n == "X":
+        return gc == gt
+    if n.startswith("1X"):
+        return gc >= gt
+    if n.startswith("X2"):
+        return gc <= gt
+    if n.startswith("12"):
+        return gc != gt
+    # goal / no goal
+    if n == "Goal":
+        return gc > 0 and gt > 0
+    if n == "No Goal":
+        return not (gc > 0 and gt > 0)
+    # over/under totali
+    if n.startswith("Over ") and "totali" in n:
+        return tot > float(n.split()[1])
+    if n.startswith("Under ") and "totali" in n:
+        return tot < float(n.split()[1])
+    # over gol squadra di casa / trasferta
+    if n.startswith("Over ") and "gol squadra di casa" in n:
+        return gc > float(n.split()[1])
+    if n.startswith("Over ") and "gol squadra in trasferta" in n:
+        return gt > float(n.split()[1])
+    # bande di gol totali
+    if n.startswith("1-") and "totali" in n:
+        hi = int(n.split("-")[1].split()[0])
+        return 1 <= tot <= hi
+    return None
