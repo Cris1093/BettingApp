@@ -492,10 +492,19 @@ def _tabella_statistica(stat):
     return {"titolo": "📋 Tabella statistica completa", "righe": righe}
 
 
-# mercati che i due motori hanno in comune (per la fusione)
-_MAP_STAT_MOTORE = {"1": "1", "X": "X", "2": "2", "1X": "1X", "X2": "X2", "12": "12",
-                    "Over 2.5": "Over 2.5", "Under 2.5": "Under 2.5",
-                    "Goal": "Goal", "No Goal": "No Goal"}
+# mercati che i due motori hanno in comune (per la fusione): nome_statistico -> nome_motore
+_MAP_STAT_MOTORE = {
+    "1 (casa vince / ospite perde)": "1",
+    "2 (casa perde / ospite vince)": "2",
+    "X (pareggio)": "X",
+    "1X (casa non perde / ospite non vince)": "1X",
+    "X2 (casa non vince / ospite non perde)": "X2",
+    "12 (nessun pareggio)": "12",
+    "Over 2.5 totali": "Over 2.5",
+    "Under 2.5 totali": "Under 2.5",
+    "Goal": "Goal",
+    "No Goal": "No Goal",
+}
 
 
 def fondi_due_motori(signal, stat):

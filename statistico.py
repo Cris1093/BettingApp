@@ -62,55 +62,67 @@ def _riga(nome, tipologia, ph, pa, pred_home, pred_away):
 
 
 def tabella_eventi(ph, pa):
-    """Tutte le righe evento richieste. ph/pa = liste partite (gf,gs,casa) di casa/ospite."""
+    """Tutte le righe evento con gli INCROCI corretti tra le due squadre.
+    ph/pa = liste partite (gf,gs,casa) di casa/ospite. Regola: per ogni evento la colonna
+    'casa' e la colonna 'trasf' misurano metriche INCROCIATE (attacco vs difesa, vittoria
+    vs sconfitta), non la stessa metrica su entrambe."""
     ph_home = _split(ph, True)     # casa in casa
     pa_away = _split(pa, False)    # ospite in trasferta
     righe = []
 
-    # --- esiti 1X2 e doppie chance (casa vince / ospite perde, ecc.) ---
-    # "1" = vittoria casa: home vince, away perde
-    righe.append(_riga("1", "generale", ph, pa, _vinc, _perd))
-    righe.append(_riga("1", "casa/trasf", ph_home, pa_away, _vinc, _perd))
-    righe.append(_riga("X", "generale", ph, pa, _pari, _pari))
-    righe.append(_riga("X", "casa/trasf", ph_home, pa_away, _pari, _pari))
-    righe.append(_riga("2", "generale", ph, pa, _perd, _vinc))
-    righe.append(_riga("2", "casa/trasf", ph_home, pa_away, _perd, _vinc))
+    # === ESITI 1X2: incrocio vittoria/sconfitta ===
+    # "1" = casa vince: quanto la casa VINCE  vs  quanto l'ospite PERDE
+    righe.append(_riga("1 (casa vince / ospite perde)", "generale", ph, pa, _vinc, _perd))
+    righe.append(_riga("1 (casa vince / ospite perde)", "casa/trasf", ph_home, pa_away, _vinc, _perd))
+    # "2" = ospite vince: quanto la casa PERDE  vs  quanto l'ospite VINCE
+    righe.append(_riga("2 (casa perde / ospite vince)", "generale", ph, pa, _perd, _vinc))
+    righe.append(_riga("2 (casa perde / ospite vince)", "casa/trasf", ph_home, pa_away, _perd, _vinc))
+    # "X" = pareggio: quanto pareggiano entrambe
+    righe.append(_riga("X (pareggio)", "generale", ph, pa, _pari, _pari))
+    righe.append(_riga("X (pareggio)", "casa/trasf", ph_home, pa_away, _pari, _pari))
     # 1X = casa non perde / ospite non vince
-    righe.append(_riga("1X", "generale", ph, pa, lambda p: not _perd(p), lambda p: not _vinc(p)))
-    righe.append(_riga("1X", "casa/trasf", ph_home, pa_away, lambda p: not _perd(p), lambda p: not _vinc(p)))
+    righe.append(_riga("1X (casa non perde / ospite non vince)", "generale", ph, pa,
+                       lambda p: not _perd(p), lambda p: not _vinc(p)))
+    righe.append(_riga("1X (casa non perde / ospite non vince)", "casa/trasf", ph_home, pa_away,
+                       lambda p: not _perd(p), lambda p: not _vinc(p)))
     # X2 = casa non vince / ospite non perde
-    righe.append(_riga("X2", "generale", ph, pa, lambda p: not _vinc(p), lambda p: not _perd(p)))
-    righe.append(_riga("X2", "casa/trasf", ph_home, pa_away, lambda p: not _vinc(p), lambda p: not _perd(p)))
+    righe.append(_riga("X2 (casa non vince / ospite non perde)", "generale", ph, pa,
+                       lambda p: not _vinc(p), lambda p: not _perd(p)))
+    righe.append(_riga("X2 (casa non vince / ospite non perde)", "casa/trasf", ph_home, pa_away,
+                       lambda p: not _vinc(p), lambda p: not _perd(p)))
     # 12 = non pareggio (entrambe)
-    righe.append(_riga("12", "generale", ph, pa, lambda p: not _pari(p), lambda p: not _pari(p)))
-    righe.append(_riga("12", "casa/trasf", ph_home, pa_away, lambda p: not _pari(p), lambda p: not _pari(p)))
+    righe.append(_riga("12 (nessun pareggio)", "generale", ph, pa,
+                       lambda p: not _pari(p), lambda p: not _pari(p)))
+    righe.append(_riga("12 (nessun pareggio)", "casa/trasf", ph_home, pa_away,
+                       lambda p: not _pari(p), lambda p: not _pari(p)))
 
-    # --- vittorie/pareggi/sconfitte casa-trasferta espliciti ---
-    righe.append(_riga("Vittoria", "casa/trasf", ph_home, pa_away, _vinc, _vinc))
-    righe.append(_riga("Pareggio", "casa/trasf", ph_home, pa_away, _pari, _pari))
-    righe.append(_riga("Sconfitta", "casa/trasf", ph_home, pa_away, _perd, _perd))
-
-    # --- Over/Under totali 0.5..4.5 (generale e casa/trasf) ---
+    # === OVER/UNDER TOTALI: stessa metrica (evento simmetrico) ===
     for l in (0.5, 1.5, 2.5, 3.5, 4.5):
-        righe.append(_riga(f"Over {l}", "generale", ph, pa, over_tot(l), over_tot(l)))
-        righe.append(_riga(f"Under {l}", "generale", ph, pa, under_tot(l), under_tot(l)))
-        righe.append(_riga(f"Over {l}", "casa/trasf", ph_home, pa_away, over_tot(l), over_tot(l)))
-        righe.append(_riga(f"Under {l}", "casa/trasf", ph_home, pa_away, under_tot(l), under_tot(l)))
+        righe.append(_riga(f"Over {l} totali", "generale", ph, pa, over_tot(l), over_tot(l)))
+        righe.append(_riga(f"Under {l} totali", "generale", ph, pa, under_tot(l), under_tot(l)))
+        righe.append(_riga(f"Over {l} totali", "casa/trasf", ph_home, pa_away, over_tot(l), over_tot(l)))
+        righe.append(_riga(f"Under {l} totali", "casa/trasf", ph_home, pa_away, under_tot(l), under_tot(l)))
 
-    # --- Over/Under gol FATTI e SUBITI per squadra (0.5,1.5,2.5) ---
+    # === GOL CON INCROCIO ATTACCO vs DIFESA ===
+    # "Gol fatti casa vs subiti trasf" = quanto la CASA segna  vs  quanto l'OSPITE incassa
+    # "Gol fatti trasf vs subiti casa" = quanto l'OSPITE segna vs  quanto la CASA incassa
     for l in (0.5, 1.5, 2.5):
-        righe.append(_riga(f"Gol fatti Over {l}", "generale", ph, pa, fatti_over(l), fatti_over(l)))
-        righe.append(_riga(f"Gol fatti Over {l}", "casa/trasf", ph_home, pa_away, fatti_over(l), fatti_over(l)))
-        righe.append(_riga(f"Gol subiti Over {l}", "generale", ph, pa, subiti_over(l), subiti_over(l)))
-        righe.append(_riga(f"Gol subiti Over {l}", "casa/trasf", ph_home, pa_away, subiti_over(l), subiti_over(l)))
+        righe.append(_riga(f"Gol fatti casa vs subiti trasf Over {l}", "generale",
+                           ph, pa, fatti_over(l), subiti_over(l)))
+        righe.append(_riga(f"Gol fatti casa vs subiti trasf Over {l}", "casa/trasf",
+                           ph_home, pa_away, fatti_over(l), subiti_over(l)))
+        righe.append(_riga(f"Gol fatti trasf vs subiti casa Over {l}", "generale",
+                           pa, ph, fatti_over(l), subiti_over(l)))
+        righe.append(_riga(f"Gol fatti trasf vs subiti casa Over {l}", "casa/trasf",
+                           pa_away, ph_home, fatti_over(l), subiti_over(l)))
 
-    # --- Goal / No Goal ---
+    # === GOAL / NO GOAL ===
     righe.append(_riga("Goal", "generale", ph, pa, _goal, _goal))
     righe.append(_riga("Goal", "casa/trasf", ph_home, pa_away, _goal, _goal))
     righe.append(_riga("No Goal", "generale", ph, pa, _nogoal, _nogoal))
     righe.append(_riga("No Goal", "casa/trasf", ph_home, pa_away, _nogoal, _nogoal))
 
-    # --- bande di gol totali 1-2 .. 1-6 ---
+    # === BANDE DI GOL TOTALI 1-2 .. 1-6 ===
     for hi in (2, 3, 4, 5, 6):
         righe.append(_riga(f"1-{hi} gol totali", "generale", ph, pa, banda(1, hi), banda(1, hi)))
 
@@ -127,19 +139,32 @@ def _evento_recente_stabile(partite, pred, k=5):
 
 # per il filtro di stabilità recente serve rimappare il nome evento -> predicato
 def _pred_da_nome(nome):
-    m = {"Goal": _goal, "No Goal": _nogoal, "Vittoria": _vinc, "Pareggio": _pari,
-         "Sconfitta": _perd, "1": _vinc, "X": _pari, "2": _perd,
-         "1X": lambda p: not _perd(p), "X2": lambda p: not _vinc(p), "12": lambda p: not _pari(p)}
-    if nome in m:
-        return m[nome]
-    if nome.startswith("Over ") and "gol" not in nome:
+    """Predicato per il filtro 'stabile nelle ultime 5'. Per gli eventi INCROCIATI usa il
+    predicato della squadra di CASA (la colonna 'casa' dell'evento)."""
+    if nome.startswith("1 ("):
+        return _vinc
+    if nome.startswith("2 ("):
+        return _perd
+    if nome.startswith("X ("):
+        return _pari
+    if nome.startswith("1X "):
+        return lambda p: not _perd(p)
+    if nome.startswith("X2 "):
+        return lambda p: not _vinc(p)
+    if nome.startswith("12 "):
+        return lambda p: not _pari(p)
+    if nome == "Goal":
+        return _goal
+    if nome == "No Goal":
+        return _nogoal
+    if nome.startswith("Over ") and "totali" in nome:
         return over_tot(float(nome.split()[1]))
-    if nome.startswith("Under "):
+    if nome.startswith("Under ") and "totali" in nome:
         return under_tot(float(nome.split()[1]))
-    if nome.startswith("Gol fatti Over "):
+    if nome.startswith("Gol fatti casa vs subiti trasf Over "):
         return fatti_over(float(nome.split()[-1]))
-    if nome.startswith("Gol subiti Over "):
-        return subiti_over(float(nome.split()[-1]))
+    if nome.startswith("Gol fatti trasf vs subiti casa Over "):
+        return fatti_over(float(nome.split()[-1]))
     if nome.startswith("1-") and "totali" in nome:
         return banda(1, int(nome.split("-")[1].split()[0]))
     return None
