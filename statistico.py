@@ -103,18 +103,24 @@ def tabella_eventi(ph, pa):
         righe.append(_riga(f"Over {l} totali", "casa/trasf", ph_home, pa_away, over_tot(l), over_tot(l)))
         righe.append(_riga(f"Under {l} totali", "casa/trasf", ph_home, pa_away, under_tot(l), under_tot(l)))
 
-    # === GOL CON INCROCIO ATTACCO vs DIFESA ===
-    # "Gol fatti casa vs subiti trasf" = quanto la CASA segna  vs  quanto l'OSPITE incassa
-    # "Gol fatti trasf vs subiti casa" = quanto l'OSPITE segna vs  quanto la CASA incassa
+    # === GOL PER SQUADRA (incrocio attacco vs difesa, raggruppato per chi segna) ===
+    # "Over X gol squadra di casa"  = attacco CASA (fa) + difesa OSPITE (subisce)
+    #    -> colonna casa: quante volte la casa HA FATTO over X
+    #    -> colonna trasf: quante volte l'ospite HA SUBITO over X
+    # "Over X gol squadra in trasferta" = attacco OSPITE (fa) + difesa CASA (subisce)
+    #    -> colonna casa: quante volte la casa HA SUBITO over X
+    #    -> colonna trasf: quante volte l'ospite HA FATTO over X
     for l in (0.5, 1.5, 2.5):
-        righe.append(_riga(f"Gol fatti casa vs subiti trasf Over {l}", "generale",
+        # gol della squadra di CASA: fa la casa vs subisce l'ospite
+        righe.append(_riga(f"Over {l} gol squadra di casa", "generale",
                            ph, pa, fatti_over(l), subiti_over(l)))
-        righe.append(_riga(f"Gol fatti casa vs subiti trasf Over {l}", "casa/trasf",
+        righe.append(_riga(f"Over {l} gol squadra di casa", "casa/trasf",
                            ph_home, pa_away, fatti_over(l), subiti_over(l)))
-        righe.append(_riga(f"Gol fatti trasf vs subiti casa Over {l}", "generale",
-                           pa, ph, fatti_over(l), subiti_over(l)))
-        righe.append(_riga(f"Gol fatti trasf vs subiti casa Over {l}", "casa/trasf",
-                           pa_away, ph_home, fatti_over(l), subiti_over(l)))
+        # gol della squadra in TRASFERTA: subisce la casa vs fa l'ospite
+        righe.append(_riga(f"Over {l} gol squadra in trasferta", "generale",
+                           ph, pa, subiti_over(l), fatti_over(l)))
+        righe.append(_riga(f"Over {l} gol squadra in trasferta", "casa/trasf",
+                           ph_home, pa_away, subiti_over(l), fatti_over(l)))
 
     # === GOAL / NO GOAL ===
     righe.append(_riga("Goal", "generale", ph, pa, _goal, _goal))
@@ -161,10 +167,10 @@ def _pred_da_nome(nome):
         return over_tot(float(nome.split()[1]))
     if nome.startswith("Under ") and "totali" in nome:
         return under_tot(float(nome.split()[1]))
-    if nome.startswith("Gol fatti casa vs subiti trasf Over "):
-        return fatti_over(float(nome.split()[-1]))
-    if nome.startswith("Gol fatti trasf vs subiti casa Over "):
-        return fatti_over(float(nome.split()[-1]))
+    if nome.startswith("Over ") and "gol squadra di casa" in nome:
+        return fatti_over(float(nome.split()[1]))
+    if nome.startswith("Over ") and "gol squadra in trasferta" in nome:
+        return subiti_over(float(nome.split()[1]))
     if nome.startswith("1-") and "totali" in nome:
         return banda(1, int(nome.split("-")[1].split()[0]))
     return None
