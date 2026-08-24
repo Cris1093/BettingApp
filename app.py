@@ -580,13 +580,17 @@ def upsert_pronostico(record):
         else:
             cli.table("pronostici").insert(rec).execute()
 
-    _opzionali = ("scheda_json", "riepilogo", "mercato_ragionato", "score_ragionato")
+    _opzionali = ("scheda_json", "riepilogo", "mercato_ragionato", "score_ragionato",
+                  "merc_motore", "conf_motore", "merc_statistico", "conf_statistico",
+                  "merc_fusione", "conf_fusione")
     try:
         _do(record)
     except Exception:
         # fallback progressivo: rimuovi le colonne opzionali che il DB potrebbe non avere
         rec2 = {k: v for k, v in record.items()
-                if k not in ("scheda_json", "mercato_ragionato", "score_ragionato")}
+                if k not in ("scheda_json", "mercato_ragionato", "score_ragionato",
+                             "merc_motore", "conf_motore", "merc_statistico",
+                             "conf_statistico", "merc_fusione", "conf_fusione")}
         try:
             _do(rec2)
         except Exception:
@@ -2616,7 +2620,8 @@ def carica_backtest_snapshot():
 
 def _backtest_una_partita(df, comp_df, riga):
     """Ricostruisce la probabilità pre-partita per UNA partita conclusa, usando solo i
-    dati precedenti (walk-forward). Ritorna dict {mercato: prob 0..1} o None."""
+    dati precedenti (walk-forward). Ritorna (prob, (nh,na), tre_pick) o None.
+    tre_pick = {'motore':merc, 'statistico':merc, 'fusione':merc}."""
     home = riga["squadra_casa"]
     away = riga["squadra_trasferta"]
     data_p = riga["data"]
@@ -2631,7 +2636,15 @@ def _backtest_una_partita(df, comp_df, riga):
     hcap_h = _handicap_livello(ph, t_liv)
     hcap_a = _handicap_livello(pa, t_liv)
     ev = evidenze.costruisci_evidenze(ph, pa, odds=None, hcap_home=hcap_h, hcap_away=hcap_a)
-    return ev["prob"], (len(ph), len(pa))
+    sig = segnali.calcola_signal(ev)
+    stat = statistico.analizza(ph, pa)
+    racc = racconto.racconta(home, away, ev, sig, statistico=stat)
+    tre = {
+        "motore": (racc.get("pronostico") or {}).get("mercato"),
+        "statistico": (racc.get("pronostico_statistico") or {}).get("pronostico"),
+        "fusione": (racc.get("pronostici_fusi") or [{}])[0].get("mercato") if racc.get("pronostici_fusi") else None,
+    }
+    return ev["prob"], (len(ph), len(pa)), tre
 
 
 def pagina_backtest(user):
@@ -2659,13 +2672,21 @@ def pagina_backtest(user):
                     mj = json.loads(s.get("metriche_json") or "{}")
                 except Exception:
                     mj = {}
-                battuti = sum(1 for v in mj.values() if v.get("batte_baseline"))
-                brier_medio = ([v["brier"] for v in mj.values() if v.get("brier") is not None])
+                # nuova struttura {mercati:{}, tre_motori:{}} o vecchia piatta
+                mercati = mj.get("mercati", mj) if isinstance(mj, dict) else {}
+                tre = mj.get("tre_motori", {}) if isinstance(mj, dict) else {}
+                battuti = sum(1 for v in mercati.values()
+                              if isinstance(v, dict) and v.get("batte_baseline"))
+                brier_medio = [v["brier"] for v in mercati.values()
+                               if isinstance(v, dict) and v.get("brier") is not None]
                 bm = round(sum(brier_medio) / len(brier_medio), 4) if brier_medio else None
+                fus = tre.get("fusione", {}).get("riuscita") if tre else None
                 data_s = str(s.get("creato_il", ""))[:16].replace("T", " ")
                 righe.append({"Data": data_s, "N valutate": s.get("n_valutate"),
-                              "Mercati che battono baseline": f"{battuti}/{len(mj)}",
-                              "Brier medio": bm, "Nota": s.get("nota") or ""})
+                              "Mercati che battono baseline": f"{battuti}/{len(mercati)}",
+                              "Brier medio": bm,
+                              "Fusione riuscita %": fus,
+                              "Nota": s.get("nota") or ""})
             st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
             st.caption("Con più snapshot nel tempo vedrai se il motore migliora: Brier medio "
                        "in calo e più mercati che battono il baseline = progresso reale.")
@@ -2691,6 +2712,7 @@ def pagina_backtest(user):
     valutate = saltate = 0
     prog = st.progress(0.0, text="Ricostruzione pre-partita…")
     righe = list(concluse.iterrows())
+    hit = {"motore": [0, 0], "statistico": [0, 0], "fusione": [0, 0]}  # [azzeccati, sbagliati]
     for i, (_, r) in enumerate(righe):
         if i % 10 == 0:
             prog.progress(i / max(1, len(righe)), text=f"Partita {i+1}/{len(righe)}…")
@@ -2700,7 +2722,7 @@ def pagina_backtest(user):
             if not res:
                 saltate += 1
                 continue
-            prob, (nh, na) = res
+            prob, (nh, na), tre = res
             if min(nh, na) < min_storico:
                 saltate += 1
                 continue
@@ -2711,10 +2733,20 @@ def pagina_backtest(user):
                     continue
                 y = fesito(gc, gt)
                 dati[m].append((p / 100.0, y))
-                # ROI: solo dove esiste la quota storica salvata (se presente)
                 q = _quota_storica(r, chiave)
-                if q and p / 100.0 * q - 1 > 0:      # scommetti solo se il modello vede value
+                if q and p / 100.0 * q - 1 > 0:
                     scommesse[m].append((y, q))
+            # hit-rate dei tre motori sul loro pronostico di punta
+            for eng in ("motore", "statistico", "fusione"):
+                merc = tre.get(eng)
+                if not merc:
+                    continue
+                base = merc.split(" (")[0].replace(" totali", "")
+                won = _pronostico_vinto(base, gc, gt)
+                if won is True:
+                    hit[eng][0] += 1
+                elif won is False:
+                    hit[eng][1] += 1
         except Exception:
             saltate += 1
     prog.progress(1.0, text="Completato.")
@@ -2723,6 +2755,22 @@ def pagina_backtest(user):
     if valutate == 0:
         st.warning("Nessuna partita con storico sufficiente. Abbassa lo storico minimo.")
         return
+
+    # ---- CONFRONTO TRE MOTORI (hit-rate del pronostico di punta) ----
+    st.subheader("Confronto tra i tre motori (walk-forward)")
+    st.caption("Percentuale di volte in cui il pronostico DI PUNTA di ogni motore si è "
+               "verificato, ricostruito pre-partita. È il confronto diretto di affidabilità.")
+    tab_tre = []
+    for eng, nome in (("motore", "🎯 Motore"), ("statistico", "📊 Statistico"), ("fusione", "🏆 Fusione")):
+        v, p = hit[eng]
+        tot = v + p
+        tab_tre.append({"Motore": nome, "Pronostici valutati": tot,
+                        "Azzeccati": v, "Riuscita %": round(v / tot * 100, 1) if tot else None})
+    st.dataframe(pd.DataFrame(tab_tre), use_container_width=True, hide_index=True)
+    hit_snap = {eng: {"azzeccati": hit[eng][0], "totale": hit[eng][0] + hit[eng][1],
+                      "riuscita": round(hit[eng][0] / (hit[eng][0] + hit[eng][1]) * 100, 1)
+                      if (hit[eng][0] + hit[eng][1]) else None}
+                for eng in ("motore", "statistico", "fusione")}
 
     # ---- METRICHE QUALITÀ MODELLO (protagoniste) ----
     st.subheader("Qualità delle probabilità (indipendente dalle quote)")
@@ -2757,7 +2805,8 @@ def pagina_backtest(user):
         nota = st.text_input("Nota (facoltativa)", placeholder="es. stato attuale, prima di correggere i λ")
         if st.button("💾 Salva snapshot"):
             try:
-                salva_backtest_snapshot(valutate, min_storico, metriche_snap, nota)
+                salva_backtest_snapshot(valutate, min_storico,
+                                        {"mercati": metriche_snap, "tre_motori": hit_snap}, nota)
                 st.success("Snapshot salvato: potrai confrontare i miglioramenti nel tempo.")
             except Exception as e:
                 st.error(f"Salvataggio non riuscito (hai creato la tabella backtest_snapshot?): {e}")
@@ -3414,6 +3463,19 @@ def pagina_analisi(user):
                 if racc and racc.get("pronostico"):
                     merc_rag = racc["pronostico"].get("mercato")
                     score_rag = racc["pronostico"].get("score")
+                # tre motori: motore (probabilistico), statistico, fusione
+                m_mot = merc_rag
+                c_mot = int(score_rag) if score_rag is not None else None
+                m_stat = c_stat = None
+                if racc and racc.get("pronostico_statistico"):
+                    ps = racc["pronostico_statistico"]
+                    m_stat = ps.get("pronostico")
+                    c_stat = {"alta": 90, "media": 70, "bassa": 50}.get(ps.get("confidence"))
+                m_fus = c_fus = None
+                if racc and racc.get("pronostici_fusi"):
+                    pf = racc["pronostici_fusi"][0]
+                    m_fus = pf.get("mercato")
+                    c_fus = pf.get("confidence")
                 upsert_pronostico({
                     "partita_id": str(row["id"]),
                     "data": str(row["data"]) if "data" in row else None,
@@ -3427,6 +3489,9 @@ def pagina_analisi(user):
                     "scheda_json": json.dumps(_snapshot_analisi(a, odds)),
                     "mercato_ragionato": merc_rag,
                     "score_ragionato": int(score_rag) if score_rag is not None else None,
+                    "merc_motore": m_mot, "conf_motore": c_mot,
+                    "merc_statistico": m_stat, "conf_statistico": c_stat,
+                    "merc_fusione": m_fus, "conf_fusione": c_fus,
                 })
                 salvati.add(sig)
                 st.caption("💾 Pronostico salvato automaticamente in 📈 Storico pronostici.")
@@ -3609,69 +3674,99 @@ def pagina_storico_pronostici(user):
             pass
         return "", None
 
+    def _tre_motori_di(r):
+        """Ritorna {motore:(merc,conf), statistico:(merc,conf), fusione:(merc,conf)}.
+        Usa i valori salvati; se mancano (pronostici vecchi) li ricalcola pre-partita."""
+        def _get(col_m, col_c):
+            m = _txt(r.get(col_m)) if col_m in pron.columns else ""
+            c = r.get(col_c) if col_c in pron.columns else None
+            c = int(c) if c is not None and not pd.isna(c) else None
+            return (m, c)
+        mot = _get("merc_motore", "conf_motore")
+        sta = _get("merc_statistico", "conf_statistico")
+        fus = _get("merc_fusione", "conf_fusione")
+        if mot[0] and (sta[0] or fus[0]):
+            return {"motore": mot, "statistico": sta, "fusione": fus}
+        # ricalcolo al volo per i pronostici vecchi
+        try:
+            pid = _txt(r.get("partita_id"))
+            comp = None
+            if pid and not df_tutte.empty and "id" in df_tutte.columns:
+                mrow = df_tutte[df_tutte["id"].astype(str) == pid]
+                if not mrow.empty:
+                    comp = _label_da_comp(mrow.iloc[0].get("competizione"), carica_competizioni())
+            racc_r = analisi_ragionata(df_tutte, r.get("squadra_casa"), r.get("squadra_trasferta"),
+                                       data_partita=r.get("data"), escludi_id=(pid or None),
+                                       competizione=comp)
+            if racc_r:
+                pm = racc_r.get("pronostico") or {}
+                m_mot = (pm.get("mercato") or "", pm.get("score"))
+                ps = racc_r.get("pronostico_statistico") or {}
+                m_sta = (ps.get("pronostico") or "",
+                         {"alta": 90, "media": 70, "bassa": 50}.get(ps.get("confidence")))
+                pf = (racc_r.get("pronostici_fusi") or [{}])
+                pf0 = pf[0] if pf else {}
+                m_fus = (pf0.get("mercato") or "", pf0.get("confidence"))
+                return {"motore": m_mot, "statistico": m_sta, "fusione": m_fus}
+        except Exception:
+            pass
+        return {"motore": mot, "statistico": sta, "fusione": fus}
+
+    def _norm_merc(m):
+        """Normalizza i nomi lunghi dello statistico ai mercati verificabili."""
+        if not m:
+            return ""
+        base = m.split(" (")[0].replace(" totali", "")
+        base = base.replace("Over 2.5 gol squadra di casa", "").strip()
+        return base
+
     righe = []
-    vinti = persi = aperti = 0
-    vinti_rag = persi_rag = 0
+    conteggi = {"motore": [0, 0], "statistico": [0, 0], "fusione": [0, 0]}  # [vinti, persi]
+    aperti = 0
     for _, r in pron.iterrows():
         gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
-        esito = ""
-        esito_rag = ""
-        merc_rag, score_rag = _ragionato_di(r)
+        tre = _tre_motori_di(r)
+        cell = {}
         if gc is not None and gt is not None and not (pd.isna(gc) or pd.isna(gt)):
             ris = f"{int(gc)}-{int(gt)}"
-            won = _pronostico_vinto(r.get("mercato") or "", gc, gt)
-            if won is True:
-                esito = "✅ vinto"
-                vinti += 1
-            elif won is False:
-                esito = "❌ perso"
-                persi += 1
-            else:
-                esito = "—"
-            if merc_rag:
-                won_r = _pronostico_vinto(merc_rag, gc, gt)
-                if won_r is True:
-                    esito_rag = "✅ vinto"
-                    vinti_rag += 1
-                elif won_r is False:
-                    esito_rag = "❌ perso"
-                    persi_rag += 1
+            for eng in ("motore", "statistico", "fusione"):
+                merc, conf = tre[eng]
+                won = _pronostico_vinto(_norm_merc(merc), gc, gt) if merc else None
+                if won is True:
+                    cell[eng] = "✅"; conteggi[eng][0] += 1
+                elif won is False:
+                    cell[eng] = "❌"; conteggi[eng][1] += 1
                 else:
-                    esito_rag = "—"
+                    cell[eng] = "—"
         else:
-            ris = "in attesa"
-            aperti += 1
+            ris = "in attesa"; aperti += 1
+            for eng in ("motore", "statistico", "fusione"):
+                cell[eng] = ""
         righe.append({
             "Data": r.get("data"), "Casa": r.get("squadra_casa"),
-            "Trasferta": r.get("squadra_trasferta"),
-            "Pronostico (vecchio)": r.get("mercato"),
-            "Conf.": None if pd.isna(r.get("confidence")) else int(r.get("confidence")),
-            "Risultato": ris, "Esito (vecchio)": esito,
-            "Pronostico ragionato": merc_rag or "—",
-            "Score rag.": int(score_rag) if score_rag is not None and not pd.isna(score_rag) else None,
-            "Esito ragionato": esito_rag,
+            "Trasferta": r.get("squadra_trasferta"), "Risultato": ris,
+            "Motore": tre["motore"][0] or "—", "Conf. M": tre["motore"][1],
+            "✓M": cell["motore"],
+            "Statistico": tre["statistico"][0] or "—", "Conf. S": tre["statistico"][1],
+            "✓S": cell["statistico"],
+            "Fusione": tre["fusione"][0] or "—", "Conf. F": tre["fusione"][1],
+            "✓F": cell["fusione"],
         })
 
-    giocati = vinti + persi
-    giocati_rag = vinti_rag + persi_rag
-    st.markdown("**Confronto tra i due metodi**")
-    c = st.columns(2)
-    with c[0]:
-        st.caption("📐 Metodo vecchio (Elo/Poisson)")
-        if giocati:
-            cc = st.columns(2)
-            cc[0].metric("Giocati", giocati)
-            cc[1].metric("Riuscita", f"{vinti/giocati*100:.0f}%")
-        else:
-            st.caption("Nessun pronostico ancora concluso.")
-    with c[1]:
-        st.caption("🧠 Metodo ragionato")
-        if giocati_rag:
-            cc = st.columns(2)
-            cc[0].metric("Giocati", giocati_rag)
-            cc[1].metric("Riuscita", f"{vinti_rag/giocati_rag*100:.0f}%")
-        else:
-            st.caption("Nessun pronostico ragionato ancora concluso (si popola d'ora in avanti).")
+    st.markdown("**Confronto tra i tre motori**")
+    cols = st.columns(3)
+    nomi = {"motore": "🎯 Motore", "statistico": "📊 Statistico", "fusione": "🏆 Fusione"}
+    for i, eng in enumerate(("motore", "statistico", "fusione")):
+        v, p = conteggi[eng]
+        tot = v + p
+        with cols[i]:
+            st.caption(nomi[eng])
+            if tot:
+                cc = st.columns(2)
+                cc[0].metric("Giocati", tot)
+                cc[1].metric("Riuscita", f"{v/tot*100:.0f}%")
+            else:
+                st.caption("Nessuno concluso (si popola d'ora in avanti).")
     if aperti:
         st.caption(f"{aperti} in attesa di risultato.")
 

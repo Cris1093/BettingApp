@@ -63,6 +63,10 @@ create table if not exists pronostici (
     scheda_json  text,                      -- snapshot analisi COMPLETA (tutti i mercati) pre-partita
     mercato_ragionato text,                 -- pronostico del metodo ragionato (per confronto)
     score_ragionato   int,
+    -- tre motori: pronostico + confidence per ciascuno
+    merc_motore     text,   conf_motore     int,   -- motore probabilistico (fuso freq+Poisson)
+    merc_statistico text,   conf_statistico int,   -- motore statistico (frequenze grezze)
+    merc_fusione    text,   conf_fusione    int,   -- fusione dei due motori (il più sicuro)
     creato_il    timestamptz default now()
 );
 
@@ -102,6 +106,12 @@ create table if not exists competizioni (
 --    alter table pronostici add column if not exists scheda_json text;
 --    alter table pronostici add column if not exists mercato_ragionato text;
 --    alter table pronostici add column if not exists score_ragionato int;
+--    alter table pronostici add column if not exists merc_motore text;
+--    alter table pronostici add column if not exists conf_motore int;
+--    alter table pronostici add column if not exists merc_statistico text;
+--    alter table pronostici add column if not exists conf_statistico int;
+--    alter table pronostici add column if not exists merc_fusione text;
+--    alter table pronostici add column if not exists conf_fusione int;
 --    (le tabelle competizioni, pronostici e calibrazione vengono create dai blocchi
 --     'create table if not exists' qui sopra: rilancia lo schema per crearle)
 --
