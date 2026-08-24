@@ -3645,38 +3645,22 @@ def pagina_storico_pronostici(user):
                 "'💾 Salva questo pronostico'.")
         return
 
-    # dataframe partite per (ri)calcolare il pronostico ragionato dove manca
+    # dataframe partite (serve solo se chiedi il ricalcolo dei vecchi)
     df_tutte = carica_partite()
-
-    def _ragionato_di(r):
-        """Pronostico ragionato: usa quello salvato, altrimenti lo ricalcola pre-partita."""
-        merc = _txt(r.get("mercato_ragionato")) if "mercato_ragionato" in pron.columns else ""
-        score = (r.get("score_ragionato")
-                 if "score_ragionato" in pron.columns else None)
-        if merc:
-            return merc, (int(score) if score is not None and not pd.isna(score) else None)
-        # ricalcolo al volo (deterministico, filtrato per data)
-        try:
-            pid = _txt(r.get("partita_id"))
-            data_p = r.get("data")
-            comp = None
-            if pid and not df_tutte.empty and "id" in df_tutte.columns:
-                mrow = df_tutte[df_tutte["id"].astype(str) == pid]
-                if not mrow.empty:
-                    comp = _label_da_comp(mrow.iloc[0].get("competizione"), carica_competizioni())
-            racc_r = analisi_ragionata(df_tutte, r.get("squadra_casa"), r.get("squadra_trasferta"),
-                                       data_partita=data_p, escludi_id=(pid or None),
-                                       competizione=comp)
-            if racc_r and racc_r.get("pronostico"):
-                return (racc_r["pronostico"].get("mercato") or "",
-                        racc_r["pronostico"].get("score"))
-        except Exception:
-            pass
-        return "", None
+    comp_df_st = carica_competizioni()
+    # mappa partita_id -> codice competizione (una volta, per velocità)
+    comp_per_id = {}
+    if not df_tutte.empty and "id" in df_tutte.columns:
+        for _, mm_ in df_tutte.iterrows():
+            comp_per_id[str(mm_.get("id"))] = mm_.get("competizione")
+    ricalcola_vecchi = st.checkbox(
+        "Ricalcola i pronostici vecchi mancanti (più lento)", value=False,
+        help="Se attivo, per i pronostici salvati prima dei tre motori ricostruisce "
+             "l'analisi pre-partita. Lascialo spento per un caricamento istantaneo.")
 
     def _tre_motori_di(r):
-        """Ritorna {motore:(merc,conf), statistico:(merc,conf), fusione:(merc,conf)}.
-        Usa i valori salvati; se mancano (pronostici vecchi) li ricalcola pre-partita."""
+        """{motore:(merc,conf), statistico:(merc,conf), fusione:(merc,conf)} dai valori
+        SALVATI (istantaneo). Ricalcola solo se richiesto e se mancano."""
         def _get(col_m, col_c):
             m = _txt(r.get(col_m)) if col_m in pron.columns else ""
             c = r.get(col_c) if col_c in pron.columns else None
@@ -3685,9 +3669,14 @@ def pagina_storico_pronostici(user):
         mot = _get("merc_motore", "conf_motore")
         sta = _get("merc_statistico", "conf_statistico")
         fus = _get("merc_fusione", "conf_fusione")
-        if mot[0] and (sta[0] or fus[0]):
+        # fallback leggero: se manca merc_motore usa il mercato_ragionato salvato
+        if not mot[0] and "mercato_ragionato" in pron.columns:
+            mr = _txt(r.get("mercato_ragionato"))
+            sc = r.get("score_ragionato")
+            mot = (mr, int(sc) if sc is not None and not pd.isna(sc) else None)
+        if mot[0] or not ricalcola_vecchi:
             return {"motore": mot, "statistico": sta, "fusione": fus}
-        # ricalcolo al volo per i pronostici vecchi
+        # ricalcolo al volo SOLO se richiesto esplicitamente
         try:
             pid = _txt(r.get("partita_id"))
             comp = None
@@ -3704,7 +3693,7 @@ def pagina_storico_pronostici(user):
                 ps = racc_r.get("pronostico_statistico") or {}
                 m_sta = (ps.get("pronostico") or "",
                          {"alta": 90, "media": 70, "bassa": 50}.get(ps.get("confidence")))
-                pf = (racc_r.get("pronostici_fusi") or [{}])
+                pf = racc_r.get("pronostici_fusi") or []
                 pf0 = pf[0] if pf else {}
                 m_fus = (pf0.get("mercato") or "", pf0.get("confidence"))
                 return {"motore": m_mot, "statistico": m_sta, "fusione": m_fus}
@@ -3745,6 +3734,8 @@ def pagina_storico_pronostici(user):
         righe.append({
             "Data": r.get("data"), "Casa": r.get("squadra_casa"),
             "Trasferta": r.get("squadra_trasferta"), "Risultato": ris,
+            "Competizione": _label_da_comp(comp_per_id.get(_txt(r.get("partita_id"))),
+                                           comp_df_st) or "",
             "Motore": tre["motore"][0] or "—", "Conf. M": tre["motore"][1],
             "✓M": cell["motore"],
             "Statistico": tre["statistico"][0] or "—", "Conf. S": tre["statistico"][1],
@@ -3770,17 +3761,82 @@ def pagina_storico_pronostici(user):
     if aperti:
         st.caption(f"{aperti} in attesa di risultato.")
 
-    tab = pd.DataFrame(righe)
-    st.caption("Clicca una riga per aprire il 📋 riepilogo pre-partita.")
-    sel = st.dataframe(tab, use_container_width=True, hide_index=True,
-                       on_select="rerun", selection_mode="single-row")
+    # opzioni competizione (etichette leggibili) per il menu a tendina
+    comp_opts = [""]
+    comp_code_by_label = {}
+    if comp_df_st is not None and not comp_df_st.empty:
+        for _, cc_ in comp_df_st.iterrows():
+            lab = _label_da_comp(cc_.get("nome_corto"), comp_df_st)
+            if lab and lab not in comp_code_by_label:
+                comp_code_by_label[lab] = cc_.get("nome_corto")
+                comp_opts.append(lab)
 
-    # riepilogo della riga selezionata
-    idxs = []
-    try:
-        idxs = sel.selection.rows
-    except Exception:
-        idxs = []
+    tab = pd.DataFrame(righe)
+    st.markdown("**Inserisci risultati e competizioni** direttamente qui (formato risultato: "
+                "`1-1`, `2-0`…). Poi premi Salva. Le colonne dei pronostici non sono modificabili.")
+    edit = st.data_editor(
+        tab, use_container_width=True, hide_index=True, key="editor_storico",
+        column_config={
+            "Risultato": st.column_config.TextColumn("Risultato", help="Es. 1-1, 2-0"),
+            "Competizione": st.column_config.SelectboxColumn("Competizione", options=comp_opts),
+            "Data": st.column_config.Column(disabled=True),
+            "Casa": st.column_config.Column(disabled=True),
+            "Trasferta": st.column_config.Column(disabled=True),
+            "Motore": st.column_config.Column(disabled=True),
+            "Conf. M": st.column_config.Column(disabled=True),
+            "✓M": st.column_config.Column(disabled=True),
+            "Statistico": st.column_config.Column(disabled=True),
+            "Conf. S": st.column_config.Column(disabled=True),
+            "✓S": st.column_config.Column(disabled=True),
+            "Fusione": st.column_config.Column(disabled=True),
+            "Conf. F": st.column_config.Column(disabled=True),
+            "✓F": st.column_config.Column(disabled=True),
+        })
+
+    if st.button("💾 Salva risultati e competizioni", type="primary"):
+        import re as _re
+        recs = []
+        for i, r in pron.reset_index(drop=True).iterrows():
+            pid = _txt(r.get("partita_id"))
+            if not pid:
+                continue
+            rec = {"id": pid}
+            cambia = False
+            # risultato
+            ris_txt = _txt(edit.iloc[i]["Risultato"])
+            mm = _re.match(r"^\s*(\d+)\s*[-:]\s*(\d+)\s*$", ris_txt)
+            if mm:
+                gc_new, gt_new = int(mm.group(1)), int(mm.group(2))
+                old_gc, old_gt = r.get("gol_casa"), r.get("gol_trasferta")
+                if (pd.isna(old_gc) or pd.isna(old_gt) or int(old_gc) != gc_new
+                        or int(old_gt) != gt_new):
+                    rec["gol_casa"] = gc_new
+                    rec["gol_trasferta"] = gt_new
+                    cambia = True
+            # competizione
+            comp_lab = _txt(edit.iloc[i].get("Competizione"))
+            if comp_lab and comp_lab in comp_code_by_label:
+                rec["competizione"] = comp_code_by_label[comp_lab]
+                cambia = True
+            if cambia:
+                recs.append(rec)
+        if recs:
+            try:
+                aggiorna_partite(recs)
+                st.success(f"Aggiornate {len(recs)} partite (risultati/competizioni). "
+                           "Gli esiti dei pronostici si aggiornano al ricarico.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Errore nel salvataggio: {e}")
+        else:
+            st.info("Nessuna modifica valida da salvare.")
+
+    # riepilogo pre-partita tramite selettore (non più click, per compatibilità con l'editor)
+    st.caption("Per aprire il 📋 riepilogo pre-partita di un pronostico, selezionalo qui:")
+    opzioni_riep = {f"{r.get('data')} · {r.get('squadra_casa')} - {r.get('squadra_trasferta')}": idx
+                    for idx, (_, r) in enumerate(pron.iterrows())}
+    scelta_riep = st.selectbox("Pronostico", ["—"] + list(opzioni_riep.keys()), key="sel_riep")
+    idxs = [opzioni_riep[scelta_riep]] if scelta_riep in opzioni_riep else []
     if idxs:
         r = pron.iloc[idxs[0]]
         home = _txt(r.get("squadra_casa"))
