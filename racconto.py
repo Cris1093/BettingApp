@@ -684,9 +684,15 @@ def _classe_valore(ev_frac, edge):
             "anomalia": anomalia, "edge_txt": edge_txt}
 
 
+SIGNAL_MIN_VALORE = 20   # sotto questo il segnale è troppo fragile: EV non affidabile
+
+
 def selezione_valore(signal):
-    """Regola pratica di valore (EV → edge → signal). Ritorna (candidati ordinati, schedina)."""
+    """Regola pratica di valore (EV → edge → signal). Ritorna (candidati ordinati, schedina).
+    Il signal NON è il criterio principale, ma fa da GUARDIA: un EV alto con signal nullo o
+    troppo basso è una falsa opportunità (probabilità fragile), quindi va escluso/declassato."""
     cand = []
+    scartati_fragili = []
     for m in signal:
         ev = m.get("EV")
         if ev is None or not m.get("quota"):
@@ -694,46 +700,71 @@ def selezione_valore(signal):
         cl = _classe_valore(ev, m.get("edge_novig"))
         if not cl:
             continue
-        cand.append({**m, "_cl": cl})
+        riga = {**m, "_cl": cl}
+        # guardia signal: EV positivo ma segnale fragile -> non è una vera giocata
+        if ev > 0 and m["score"] < SIGNAL_MIN_VALORE:
+            riga["_fragile"] = True
+            scartati_fragili.append(riga)
+        else:
+            cand.append(riga)
     cand.sort(key=lambda x: (-(x["EV"] or 0), -(x.get("edge_novig") or -999), -x["score"]))
+    scartati_fragili.sort(key=lambda x: -(x["EV"] or 0))
+    # schedina: EV>=10% E signal affidabile
     schedina = [c for c in cand if c["EV"] is not None and c["EV"] * 100 >= 10][:3]
-    return cand, schedina
+    return cand, schedina, scartati_fragili
 
 
 def _sezione_valore(signal):
-    """Sezione IN CIMA: le giocate di valore secondo la regola EV → edge → signal."""
-    cand, schedina = selezione_valore(signal)
-    if not cand:
+    """Sezione IN CIMA: le giocate di valore secondo la regola EV → edge → signal.
+    Il signal fa da guardia: EV alto con segnale fragile = falsa opportunità (esclusa)."""
+    cand, schedina, fragili = selezione_valore(signal)
+    if not cand and not fragili:
         return {"titolo": "💎 Giocate di valore (EV → edge → signal)",
                 "righe": ["Nessuna quota inserita: senza quote non è possibile calcolare "
                           "EV/edge. Inserisci le quote per attivare la selezione di valore."]}
     righe = []
-    best = cand[0]
-    clb = best["_cl"]
-    q = f" @ {best['quota']}" if best.get("quota") else ""
-    edge_b = f"{best['edge_novig']:+.0f}pt" if best.get("edge_novig") is not None else "n/d"
-    riga_best = (f"{clb['col']} MIGLIORE VALORE: {best['mercato']}{q} — "
-                 f"EV {clb['ev_pct']:+.0f}%, edge {edge_b}, signal {best['score']}")
-    if clb["anomalia"]:
-        riga_best += " ⚠️ EV molto alto: verifica che non sia un'anomalia del modello."
-    righe.append(riga_best)
-    righe.append("")
-    righe.append("Tutte le giocate per valore (dalla migliore):")
-    for c in cand:
-        cl = c["_cl"]
-        q = f" @ {c['quota']}" if c.get("quota") else ""
-        edge_c = f"{c['edge_novig']:+.0f}pt" if c.get("edge_novig") is not None else "n/d"
-        extra = " ⚠️ verifica anomalia" if cl["anomalia"] else ""
-        righe.append(f"  {cl['col']} {c['mercato']}{q}: EV {cl['ev_pct']:+.0f}% · "
-                     f"edge {edge_c} · signal {c['score']} — {cl['etichetta']}, {cl['edge_txt']}{extra}")
+    if cand:
+        best = cand[0]
+        clb = best["_cl"]
+        q = f" @ {best['quota']}" if best.get("quota") else ""
+        edge_b = f"{best['edge_novig']:+.0f}pt" if best.get("edge_novig") is not None else "n/d"
+        riga_best = (f"{clb['col']} MIGLIORE VALORE: {best['mercato']}{q} — "
+                     f"EV {clb['ev_pct']:+.0f}%, edge {edge_b}, signal {best['score']}")
+        if clb["anomalia"]:
+            riga_best += " ⚠️ EV molto alto: verifica che non sia un'anomalia del modello."
+        righe.append(riga_best)
+        righe.append("")
+        righe.append("Giocate per valore, con signal affidabile (dalla migliore):")
+        for c in cand:
+            cl = c["_cl"]
+            q = f" @ {c['quota']}" if c.get("quota") else ""
+            edge_c = f"{c['edge_novig']:+.0f}pt" if c.get("edge_novig") is not None else "n/d"
+            extra = " ⚠️ verifica anomalia" if cl["anomalia"] else ""
+            righe.append(f"  {cl['col']} {c['mercato']}{q}: EV {cl['ev_pct']:+.0f}% · "
+                         f"edge {edge_c} · signal {c['score']} — {cl['etichetta']}, {cl['edge_txt']}{extra}")
+    else:
+        righe.append("Nessuna giocata di valore con signal affidabile.")
+
+    # giocate fragili: EV positivo ma signal troppo basso -> NON giocare (falsa opportunità)
+    if fragili:
+        righe.append("")
+        righe.append(f"⛔ Escluse — valore apparente ma signal < {SIGNAL_MIN_VALORE} "
+                     "(probabilità fragile, EV inaffidabile):")
+        for c in fragili[:5]:
+            cl = c["_cl"]
+            q = f" @ {c['quota']}" if c.get("quota") else ""
+            righe.append(f"  ⛔ {c['mercato']}{q}: EV {cl['ev_pct']:+.0f}% ma signal {c['score']} "
+                         "— NON giocare: il modello non è affidabile su questo mercato.")
+
     righe.append("")
     if schedina:
         nomi = ", ".join(f"{c['mercato']} @ {c['quota']}" for c in schedina)
-        righe.append(f"🎯 Schedina di valore (EV ≥ +10%): {nomi}")
+        righe.append(f"🎯 Schedina di valore (EV ≥ +10% e signal affidabile): {nomi}")
         righe.append("Ricorda: probabilità = quanto pensi succeda; quota = quanto ti pagano; "
-                     "EV = se il prezzo vale il rischio. Il valore, non la probabilità, guida la scelta.")
+                     "EV = se il prezzo vale il rischio. Il valore guida la scelta, ma il signal "
+                     "deve confermare che la probabilità è solida.")
     else:
-        righe.append("🎯 Nessuna giocata con EV ≥ +10%: nessuna candidata forte per valore.")
+        righe.append("🎯 Nessuna giocata con EV ≥ +10% e signal affidabile: niente candidate forti.")
     return {"titolo": "💎 Giocate di valore (EV → edge → signal)", "righe": righe}
 
 
