@@ -70,6 +70,8 @@ def prob_poisson(home_blocco, away_blocco, hcap_home=1.0, hcap_away=1.0, rho=-0.
     out = {
         "1": pr["1"] * 100, "X": pr["X"] * 100, "2": pr["2"] * 100,
         "Over 2.5": pr["over25"] * 100, "Under 2.5": pr["under25"] * 100,
+        "Over 1.5": pr["over15"] * 100, "Under 1.5": pr["under15"] * 100,
+        "Over 3.5": pr["over35"] * 100, "Under 3.5": pr["under35"] * 100,
         "Goal": pr["goal"] * 100, "No Goal": pr["nogoal"] * 100,
     }
     out["1X"] = out["1"] + out["X"]
@@ -100,7 +102,8 @@ def fondi(prob_freq, home_blocco, away_blocco, hcap_home=1.0, hcap_away=1.0,
 
     fusa = {}
     # gruppi complementari: fondi e rinormalizza a 100
-    for grp in (("1", "X", "2"), ("Over 2.5", "Under 2.5"), ("Goal", "No Goal")):
+    for grp in (("1", "X", "2"), ("Over 2.5", "Under 2.5"),
+                ("Over 1.5", "Under 1.5"), ("Over 3.5", "Under 3.5"), ("Goal", "No Goal")):
         vals = {m: mix(m) for m in grp if mix(m) is not None}
         s = sum(vals.values())
         if s > 0:

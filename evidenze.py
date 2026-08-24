@@ -293,6 +293,7 @@ def calcola_value(prob, quote):
     NB: affidabile solo quanto è accurata la probabilità del modello (value TEORICO
     finché non calibrato su dati reali)."""
     mappa = {"Over 2.5": "over25", "Under 2.5": "under25", "Goal": "goal", "No Goal": "nogoal",
+             "Over 1.5": "over15", "Under 1.5": "under15", "Over 3.5": "over35", "Under 3.5": "under35",
              "1": "1", "X": "X", "2": "2"}   # doppie chance: di norma senza quota
     out = {}
     for mercato, p in (prob or {}).items():
@@ -363,6 +364,12 @@ def probabilita_coerenti(home, away, hcap_home=1.0, hcap_away=1.0):
     if over is not None:
         out["Over 2.5"] = over
         out["Under 2.5"] = _r2(100 - over)
+    # linee aggiuntive 1.5 e 3.5 (stessa logica a frequenze; poi fuse con Poisson)
+    for ln in (1.5, 3.5):
+        ov = _prob_pesata(home, away, "over", ln)
+        if ov is not None:
+            out[f"Over {ln}"] = ov
+            out[f"Under {ln}"] = _r2(100 - ov)
     if goal is not None:
         out["Goal"] = goal
         out["No Goal"] = _r2(100 - goal)

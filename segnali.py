@@ -154,8 +154,8 @@ def calcola_signal(ev):
     restano coerenti e separate; value/quota vivono in ev['value']."""
     prob = ev.get("prob", {})
     mercati = []
-    for nome in ("Over 2.5", "Under 2.5", "Goal", "No Goal",
-                 "1", "X", "2", "1X", "X2", "12"):
+    for nome in ("Over 2.5", "Under 2.5", "Over 1.5", "Under 1.5", "Over 3.5", "Under 3.5",
+                 "Goal", "No Goal", "1", "X", "2", "1X", "X2", "12"):
         m = _score_mercato(nome, ev, prob)
         if m:
             mercati.append(m)

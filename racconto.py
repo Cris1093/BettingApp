@@ -495,7 +495,8 @@ def valida_incrociato(signal, stat):
         if nome_mot and nome_mot not in stat_gen:
             stat_gen[nome_mot] = r["somma"][2]   # % somma
 
-    ordine = ["1", "X", "2", "1X", "X2", "12", "Over 2.5", "Under 2.5", "Goal", "No Goal"]
+    ordine = ["1", "X", "2", "1X", "X2", "12", "Over 1.5", "Under 1.5",
+              "Over 2.5", "Under 2.5", "Over 3.5", "Under 3.5", "Goal", "No Goal"]
     tabella, valutati = [], []
     for merc in ordine:
         m = sig_by.get(merc)
@@ -598,6 +599,10 @@ _MAP_STAT_MOTORE = {
     "12 (nessun pareggio)": "12",
     "Over 2.5 totali": "Over 2.5",
     "Under 2.5 totali": "Under 2.5",
+    "Over 1.5 totali": "Over 1.5",
+    "Under 1.5 totali": "Under 1.5",
+    "Over 3.5 totali": "Over 3.5",
+    "Under 3.5 totali": "Under 3.5",
     "Goal": "Goal",
     "No Goal": "No Goal",
 }
