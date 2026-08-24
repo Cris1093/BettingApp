@@ -3820,15 +3820,24 @@ def pagina_storico_pronostici(user):
     if aperti:
         st.caption(f"{aperti} in attesa di risultato.")
 
-    # opzioni competizione (etichette leggibili) per il menu a tendina
+    # opzioni competizione per il menu a tendina: anagrafica + TUTTE quelle nei dati
     comp_opts = [""]
     comp_code_by_label = {}
+    # 1) dall'anagrafica (etichetta leggibile -> codice)
     if comp_df_st is not None and not comp_df_st.empty:
         for _, cc_ in comp_df_st.iterrows():
             lab = _label_da_comp(cc_.get("nome_corto"), comp_df_st)
             if lab and lab not in comp_code_by_label:
                 comp_code_by_label[lab] = cc_.get("nome_corto")
                 comp_opts.append(lab)
+    # 2) da tutte le competizioni presenti nelle partite (anche non mappate in anagrafica)
+    if not df_tutte.empty and "competizione" in df_tutte.columns:
+        for code in df_tutte["competizione"].dropna().unique():
+            lab = _label_da_comp(code, comp_df_st)
+            if lab and lab not in comp_code_by_label:
+                comp_code_by_label[lab] = code
+                comp_opts.append(lab)
+    comp_opts = [comp_opts[0]] + sorted(comp_opts[1:], key=lambda x: x.lower())
 
     tab = pd.DataFrame(righe)
     st.markdown("**Inserisci risultati e competizioni** direttamente qui (formato risultato: "
@@ -3837,9 +3846,10 @@ def pagina_storico_pronostici(user):
         tab, use_container_width=True, hide_index=True, key="editor_storico",
         column_config={
             "Risultato": st.column_config.TextColumn("Risultato", help="Es. 1-1, 2-0"),
-            "Competizione": st.column_config.TextColumn(
-                "Competizione", help="Scrivi la competizione (es. Serie A Betano | Brasile). "
-                "Se esiste in anagrafica viene collegata, altrimenti salvata così com'è."),
+            "Competizione": st.column_config.SelectboxColumn(
+                "Competizione", options=comp_opts,
+                help="Seleziona la competizione dal menu. Include tutte quelle presenti "
+                     "nei dati e in anagrafica."),
             "Data": st.column_config.Column(disabled=True),
             "Casa": st.column_config.Column(disabled=True),
             "Trasferta": st.column_config.Column(disabled=True),
@@ -3874,22 +3884,14 @@ def pagina_storico_pronostici(user):
                     rec["gol_casa"] = gc_new
                     rec["gol_trasferta"] = gt_new
                     cambia = True
-            # competizione: risolvi al codice se combacia con l'anagrafica, altrimenti testo
+            # competizione: risolvi al codice tramite la mappa etichetta->codice
             comp_lab = _txt(edit.iloc[i].get("Competizione"))
             comp_old_lab = _label_da_comp(comp_per_id.get(pid), comp_df_st) or ""
             if comp_lab and comp_lab != comp_old_lab:
-                # prova a mappare l'etichetta o il nome a un codice noto
                 nuovo = comp_code_by_label.get(comp_lab)
-                if not nuovo:
-                    # prova match per chiave (nome lungo/corto/nazione)
-                    k = _key(comp_lab.split("|")[0])
-                    for _, c_ in (comp_df_st.iterrows() if comp_df_st is not None
-                                  and not comp_df_st.empty else []):
-                        if k in _chiavi_competizione(c_):
-                            nuovo = c_.get("nome_corto")
-                            break
-                rec["competizione"] = nuovo or comp_lab   # codice se noto, altrimenti testo
-                cambia = True
+                if nuovo:
+                    rec["competizione"] = nuovo
+                    cambia = True
             if cambia:
                 recs.append(rec)
         if recs:
