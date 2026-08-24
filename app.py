@@ -3623,6 +3623,52 @@ def pagina_analisi(user):
 # =============================================================================
 #  MAIN
 # =============================================================================
+def backfill_tre_motori(pron, df_tutte, comp_df, progress=None):
+    """Ricalcola e SALVA i tre motori per i pronostici che non li hanno ancora.
+    Una volta popolati, lo Storico resta veloce. Ritorna il numero aggiornati."""
+    cli = get_client()
+    if not cli:
+        return 0
+    n = 0
+    righe = list(pron.iterrows())
+    for i, (_, r) in enumerate(righe):
+        if progress and i % 5 == 0:
+            progress.progress(i / max(1, len(righe)), text=f"Pronostico {i+1}/{len(righe)}…")
+        if _txt(r.get("merc_motore")):
+            continue    # già popolato
+        pid = _txt(r.get("partita_id"))
+        if not pid:
+            continue
+        try:
+            comp = None
+            if not df_tutte.empty and "id" in df_tutte.columns:
+                mrow = df_tutte[df_tutte["id"].astype(str) == pid]
+                if not mrow.empty:
+                    comp = _label_da_comp(mrow.iloc[0].get("competizione"), comp_df)
+            racc = analisi_ragionata(df_tutte, r.get("squadra_casa"), r.get("squadra_trasferta"),
+                                     data_partita=r.get("data"), escludi_id=pid, competizione=comp)
+            if not racc:
+                continue
+            pm = racc.get("pronostico") or {}
+            ps = racc.get("pronostico_statistico") or {}
+            pf = (racc.get("pronostici_fusi") or [{}])
+            pf0 = pf[0] if pf else {}
+            upd = {
+                "merc_motore": pm.get("mercato"),
+                "conf_motore": int(pm["score"]) if pm.get("score") is not None else None,
+                "merc_statistico": ps.get("pronostico"),
+                "conf_statistico": {"alta": 90, "media": 70, "bassa": 50}.get(ps.get("confidence")),
+                "merc_fusione": pf0.get("mercato"),
+                "conf_fusione": pf0.get("confidence"),
+            }
+            cli.table("pronostici").update(upd).eq("id", r["id"]).execute()
+            n += 1
+        except Exception:
+            continue
+    st.cache_data.clear()
+    return n
+
+
 def pagina_storico_pronostici(user):
     st.header("📈 Storico pronostici")
     st.caption("I pronostici salvati prima della partita, confrontati col risultato reale. "
@@ -3632,12 +3678,19 @@ def pagina_storico_pronostici(user):
         st.warning("Supabase non configurato.")
         return
 
-    cc = st.columns(2)
+    cc = st.columns(3)
     if cc[0].button("🔄 Ricarica"):
         st.cache_data.clear()
     if cc[1].button("✅ Aggiorna risultati"):
         n = completa_risultati_pronostici()
         st.success(f"Risultati abbinati a {n} pronostici." if n else "Nessun nuovo risultato.")
+    if cc[2].button("⚙️ Popola i tre motori (vecchi)"):
+        _pr = st.progress(0.0, text="Ricalcolo in corso…")
+        _pron = carica_pronostici()
+        _n = backfill_tre_motori(_pron, carica_partite(), carica_competizioni(), _pr)
+        _pr.progress(1.0, text="Completato.")
+        st.success(f"Popolati {_n} pronostici con i tre motori. Ora restano salvati.")
+        st.rerun()
 
     pron = carica_pronostici()
     if pron.empty:
@@ -3823,8 +3876,20 @@ def pagina_storico_pronostici(user):
         if recs:
             try:
                 aggiorna_partite(recs)
+                # aggiorna anche i gol nella tabella pronostici (esito immediato)
+                cli = get_client()
+                if cli:
+                    for rc in recs:
+                        if "gol_casa" in rc and "gol_trasferta" in rc:
+                            try:
+                                cli.table("pronostici").update(
+                                    {"gol_casa": rc["gol_casa"], "gol_trasferta": rc["gol_trasferta"]}
+                                ).eq("partita_id", rc["id"]).execute()
+                            except Exception:
+                                pass
+                st.cache_data.clear()
                 st.success(f"Aggiornate {len(recs)} partite (risultati/competizioni). "
-                           "Gli esiti dei pronostici si aggiornano al ricarico.")
+                           "Gli esiti dei pronostici sono aggiornati.")
                 st.rerun()
             except Exception as e:
                 st.error(f"Errore nel salvataggio: {e}")
