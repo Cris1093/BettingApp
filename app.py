@@ -1490,6 +1490,54 @@ def genera_docx_nuova_analisi(df, comp_df):
     bio = io.BytesIO(); doc.save(bio); return bio.getvalue()
 
 
+def genera_docx_mercati(df, comp_df):
+    """Word SNELLO: solo 'squadra A - squadra B', le sezioni mercati (Over/Under,
+    Goal/No Goal, 1X2 con signal/prob/quota/EV/edge) e il risultato finale."""
+    try:
+        from docx import Document
+    except Exception:
+        raise RuntimeError("Libreria python-docx non disponibile.")
+    doc = Document()
+    fx = df[df["is_target"] == True] if "is_target" in df.columns else df.iloc[0:0]
+    if "data" in fx.columns:
+        fx = fx.sort_values("data", ascending=False)
+    if fx.empty:
+        doc.add_heading("Mercati per partita", level=1)
+        doc.add_paragraph("Nessuna partita seguita da esportare.")
+        bio = io.BytesIO(); doc.save(bio); return bio.getvalue()
+
+    SEZIONI_MERCATI = {"Over / Under", "Goal / No Goal", "1X2"}
+    first = True
+    for _, row in fx.iterrows():
+        if not first:
+            doc.add_page_break()
+        first = False
+        home, away = row["squadra_casa"], row["squadra_trasferta"]
+        doc.add_heading(f"{home} - {away}", level=1)
+
+        odds = _eff_odds(row)
+        racc = analisi_ragionata(df, home, away, data_partita=row.get("data"),
+                                 odds=odds, variazioni=_variazioni_da_row(row),
+                                 escludi_id=row.get("id"),
+                                 competizione=_label_da_comp(row.get("competizione"), comp_df))
+        if not racc:
+            doc.add_paragraph("Storico insufficiente per l'analisi.")
+        else:
+            for sez in racc["sezioni"]:
+                if sez["titolo"] in SEZIONI_MERCATI:
+                    doc.add_heading(sez["titolo"], level=2)
+                    for r in sez["righe"]:
+                        doc.add_paragraph(r, style="List Bullet")
+
+        doc.add_heading("Risultato", level=2)
+        if _num_ok(row.get("gol_casa")) and _num_ok(row.get("gol_trasferta")):
+            doc.add_paragraph(f"{int(row['gol_casa'])} - {int(row['gol_trasferta'])}")
+        else:
+            doc.add_paragraph("In attesa")
+
+    bio = io.BytesIO(); doc.save(bio); return bio.getvalue()
+
+
 def _snapshot_analisi(a, odds):
     """Cattura l'analisi COMPLETA in formato dati (JSON-safe) per riproporla identica
     dopo la partita, senza ricalcolare."""
@@ -2997,20 +3045,27 @@ def pagina_configurazione(user):
             cdf = carica_competizioni()
             with st.spinner("Genero i documenti Word…"):
                 st.session_state["_docx_nuova"] = genera_docx_nuova_analisi(dfp, cdf)
+                st.session_state["_docx_mercati"] = genera_docx_mercati(dfp, cdf)
                 st.session_state["_docx_senza"] = genera_docx_archivio(dfp, cdf, con_analisi=False)
             st.success("File pronti: usa i pulsanti di download qui sotto.")
         except Exception as e:
             st.error(f"Impossibile generare il Word: {e}")
     if st.session_state.get("_docx_nuova"):
-        ca = st.columns(2)
+        ca = st.columns(3)
         ca[0].download_button(
             "⬇️ Partite con analisi", data=st.session_state["_docx_nuova"],
             file_name="archivio_analisi.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            help="Il nuovo racconto: motore, statistico, fusione e i pronostici, più i dati "
-                 "delle partite.")
+            help="Il nuovo racconto completo: motore, statistico, fusione e i pronostici, "
+                 "più i dati delle partite.")
         ca[1].download_button(
-            "⬇️ Partite senza analisi", data=st.session_state["_docx_senza"],
+            "⬇️ Solo mercati", data=st.session_state.get("_docx_mercati", b""),
+            file_name="archivio_mercati.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            help="Snello: squadra A - squadra B, le sezioni Over/Under, Goal/No Goal, 1X2 "
+                 "(signal/prob/quota/EV/edge) e il risultato.")
+        ca[2].download_button(
+            "⬇️ Senza analisi", data=st.session_state["_docx_senza"],
             file_name="archivio_partite.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             help="Solo intestazione, ultime partite, quote e risultato.")
