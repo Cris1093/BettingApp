@@ -3775,9 +3775,10 @@ def pagina_analisi(user):
 # =============================================================================
 #  MAIN
 # =============================================================================
-def backfill_tre_motori(pron, df_tutte, comp_df, progress=None):
-    """Ricalcola e SALVA i tre motori per i pronostici che non li hanno ancora.
-    Una volta popolati, lo Storico resta veloce. Ritorna il numero aggiornati."""
+def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False):
+    """Ricalcola e SALVA motore + fusione per i pronostici che non li hanno ancora.
+    Con forza=True ricalcola TUTTI (utile dopo aver cambiato la logica di fusione).
+    Ritorna il numero aggiornati."""
     cli = get_client()
     if not cli:
         return 0
@@ -3786,8 +3787,8 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None):
     for i, (_, r) in enumerate(righe):
         if progress and i % 5 == 0:
             progress.progress(i / max(1, len(righe)), text=f"Pronostico {i+1}/{len(righe)}…")
-        if _txt(r.get("merc_motore")):
-            continue    # già popolato
+        if not forza and _txt(r.get("merc_motore")) and _txt(r.get("merc_fusione")):
+            continue    # già completo (motore + fusione)
         pid = _txt(r.get("partita_id"))
         if not pid:
             continue
@@ -3835,12 +3836,19 @@ def pagina_storico_pronostici(user):
     if cc[1].button("✅ Aggiorna risultati"):
         n = completa_risultati_pronostici()
         st.success(f"Risultati abbinati a {n} pronostici." if n else "Nessun nuovo risultato.")
-    if cc[2].button("⚙️ Popola i tre motori (vecchi)"):
+    if cc[2].button("⚙️ Popola motore+fusione (mancanti)"):
         _pr = st.progress(0.0, text="Ricalcolo in corso…")
         _pron = carica_pronostici()
         _n = backfill_tre_motori(_pron, carica_partite(), carica_competizioni(), _pr)
         _pr.progress(1.0, text="Completato.")
-        st.success(f"Popolati {_n} pronostici con i tre motori. Ora restano salvati.")
+        st.success(f"Popolati {_n} pronostici. Ora restano salvati.")
+        st.rerun()
+    if st.button("🔄 Ricalcola fusione per TUTTI (dopo modifiche logica)"):
+        _pr = st.progress(0.0, text="Ricalcolo completo in corso…")
+        _pron = carica_pronostici()
+        _n = backfill_tre_motori(_pron, carica_partite(), carica_competizioni(), _pr, forza=True)
+        _pr.progress(1.0, text="Completato.")
+        st.success(f"Ricalcolati {_n} pronostici (motore + fusione a media).")
         st.rerun()
 
     pron = carica_pronostici()
