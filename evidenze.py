@@ -479,6 +479,16 @@ def costruisci_evidenze(partite_home, partite_away, odds=None, variazioni=None,
     except Exception:
         fus_det = None
 
+    # CALIBRAZIONE: corregge la sovrastima dei mercati gol (Over/Under, Goal/NoGoal),
+    # misurata dal backtest. L'1X2 resta invariato (già ben calibrato). Teniamo anche
+    # la versione grezza (prob_grezza) per trasparenza e confronto.
+    prob_grezza = dict(prob)
+    try:
+        import calibrazione
+        prob = calibrazione.calibra_prob(prob)
+    except Exception:
+        pass
+
     quote = analizza_quote(odds, variazioni)
     return {
         "home": home,
@@ -487,7 +497,8 @@ def costruisci_evidenze(partite_home, partite_away, odds=None, variazioni=None,
         "convergenze_recenti": convergenza_recente(home, away),
         "contraddizioni": contraddizioni(home, "Casa") + contraddizioni(away, "Trasferta"),
         "quote": quote,
-        "prob": prob,                                    # probabilità del MODELLO (fusa)
+        "prob": prob,                                    # probabilità del MODELLO (fusa+calibrata)
+        "prob_grezza": prob_grezza,                      # fusa PRIMA della calibrazione
         "prob_freq": prob_freq,                          # sotto-stima: frequenze
         "prob_poisson": (fus_det or {}).get("prob_poisson"),   # sotto-stima: Poisson
         "fusione": fus_det,                              # λ, risultati Poisson, pesi

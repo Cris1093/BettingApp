@@ -721,7 +721,8 @@ def _sezione_valore(signal):
     if not cand and not fragili:
         return {"titolo": "💎 Giocate di valore (EV → edge → signal)",
                 "righe": ["Nessuna quota inserita: senza quote non è possibile calcolare "
-                          "EV/edge. Inserisci le quote per attivare la selezione di valore."]}
+                          "EV/edge. Inserisci le quote per attivare la selezione di valore.",
+                          _nota_calibrazione()]}
     righe = []
     if cand:
         best = cand[0]
@@ -765,7 +766,14 @@ def _sezione_valore(signal):
                      "deve confermare che la probabilità è solida.")
     else:
         righe.append("🎯 Nessuna giocata con EV ≥ +10% e signal affidabile: niente candidate forti.")
+    righe.append(_nota_calibrazione())
     return {"titolo": "💎 Giocate di valore (EV → edge → signal)", "righe": righe}
+
+
+def _nota_calibrazione():
+    return ("ℹ️ Le probabilità dei mercati gol (Over/Under, Goal/No Goal) sono CALIBRATE: "
+            "il backtest ha mostrato che il modello le sovrastimava, quindi sono state "
+            "abbassate ai valori realistici. L'1X2 è già affidabile e resta invariato.")
 
 
 def racconta(home_name, away_name, ev, signal, competizione=None, statistico=None):
