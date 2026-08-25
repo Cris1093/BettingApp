@@ -3624,10 +3624,10 @@ def pagina_analisi(user):
                     m_stat = ps.get("pronostico")
                     c_stat = {"alta": 90, "media": 70, "bassa": 50}.get(ps.get("confidence"))
                 m_fus = c_fus = None
-                if racc and racc.get("pronostici_fusi"):
-                    pf = racc["pronostici_fusi"][0]
-                    m_fus = pf.get("mercato")
-                    c_fus = pf.get("confidence")
+                if racc and racc.get("fusione_media"):
+                    fm = racc["fusione_media"]
+                    m_fus = fm.get("mercato")
+                    c_fus = fm.get("confidence")
                 upsert_pronostico({
                     "partita_id": str(row["id"]),
                     "data": str(row["data"]) if "data" in row else None,
@@ -3803,15 +3803,14 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None):
                 continue
             pm = racc.get("pronostico") or {}
             ps = racc.get("pronostico_statistico") or {}
-            pf = (racc.get("pronostici_fusi") or [{}])
-            pf0 = pf[0] if pf else {}
+            fm = racc.get("fusione_media") or {}
             upd = {
                 "merc_motore": pm.get("mercato"),
                 "conf_motore": int(pm["score"]) if pm.get("score") is not None else None,
                 "merc_statistico": ps.get("pronostico"),
                 "conf_statistico": {"alta": 90, "media": 70, "bassa": 50}.get(ps.get("confidence")),
-                "merc_fusione": pf0.get("mercato"),
-                "conf_fusione": pf0.get("confidence"),
+                "merc_fusione": fm.get("mercato"),
+                "conf_fusione": fm.get("confidence"),
             }
             cli.table("pronostici").update(upd).eq("id", r["id"]).execute()
             n += 1
@@ -3915,7 +3914,7 @@ def pagina_storico_pronostici(user):
         return base
 
     righe = []
-    conteggi = {"motore": [0, 0], "statistico": [0, 0], "fusione": [0, 0]}  # [vinti, persi]
+    conteggi = {"motore": [0, 0], "fusione": [0, 0]}  # [vinti, persi]
     aperti = 0
     for _, r in pron.iterrows():
         gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
@@ -3923,15 +3922,10 @@ def pagina_storico_pronostici(user):
         cell = {}
         if gc is not None and gt is not None and not (pd.isna(gc) or pd.isna(gt)):
             ris = f"{int(gc)}-{int(gt)}"
-            for eng in ("motore", "statistico", "fusione"):
+            for eng in ("motore", "fusione"):
                 merc, conf = tre[eng]
-                if not merc:
-                    won = None
-                elif eng == "statistico":
-                    # eventi statistici hanno nomi lunghi: valutatore dedicato
-                    won = statistico.esito_evento(merc, int(gc), int(gt))
-                else:
-                    won = _pronostico_vinto(_norm_merc(merc), gc, gt)
+                # la fusione a media usa nomi mercato standard; valuta con _pronostico_vinto
+                won = _pronostico_vinto(_norm_merc(merc), gc, gt) if merc else None
                 if won is True:
                     cell[eng] = "✅"; conteggi[eng][0] += 1
                 elif won is False:
@@ -3940,25 +3934,23 @@ def pagina_storico_pronostici(user):
                     cell[eng] = "—"
         else:
             ris = "in attesa"; aperti += 1
-            for eng in ("motore", "statistico", "fusione"):
+            for eng in ("motore", "fusione"):
                 cell[eng] = ""
         righe.append({
             "Data": r.get("data"), "Casa": r.get("squadra_casa"),
             "Trasferta": r.get("squadra_trasferta"), "Risultato": ris,
             "Competizione": _label_da_comp(comp_per_id.get(_txt(r.get("partita_id"))),
                                            comp_df_st) or "",
-            "Motore": tre["motore"][0] or "—", "Conf. M": tre["motore"][1],
+            "🎯 Motore": tre["motore"][0] or "—", "Conf. M": tre["motore"][1],
             "✓M": cell["motore"],
-            "Statistico": tre["statistico"][0] or "—", "Conf. S": tre["statistico"][1],
-            "✓S": cell["statistico"],
-            "Fusione": tre["fusione"][0] or "—", "Conf. F": tre["fusione"][1],
+            "🔀 Fusione": tre["fusione"][0] or "—", "Conf. F": tre["fusione"][1],
             "✓F": cell["fusione"],
         })
 
-    st.markdown("**Confronto tra i tre motori**")
-    cols = st.columns(3)
-    nomi = {"motore": "🎯 Motore", "statistico": "📊 Statistico", "fusione": "🏆 Fusione"}
-    for i, eng in enumerate(("motore", "statistico", "fusione")):
+    st.markdown("**Riuscita dei pronostici**")
+    cols = st.columns(2)
+    nomi = {"motore": "🎯 Motore", "fusione": "🔀 Fusione (media motore+statistico)"}
+    for i, eng in enumerate(("motore", "fusione")):
         v, p = conteggi[eng]
         tot = v + p
         with cols[i]:
@@ -4005,13 +3997,10 @@ def pagina_storico_pronostici(user):
             "Data": st.column_config.Column(disabled=True),
             "Casa": st.column_config.Column(disabled=True),
             "Trasferta": st.column_config.Column(disabled=True),
-            "Motore": st.column_config.Column(disabled=True),
+            "🎯 Motore": st.column_config.Column(disabled=True),
             "Conf. M": st.column_config.Column(disabled=True),
             "✓M": st.column_config.Column(disabled=True),
-            "Statistico": st.column_config.Column(disabled=True),
-            "Conf. S": st.column_config.Column(disabled=True),
-            "✓S": st.column_config.Column(disabled=True),
-            "Fusione": st.column_config.Column(disabled=True),
+            "🔀 Fusione": st.column_config.Column(disabled=True),
             "Conf. F": st.column_config.Column(disabled=True),
             "✓F": st.column_config.Column(disabled=True),
         })
