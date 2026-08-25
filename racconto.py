@@ -791,7 +791,7 @@ def fusione_media(signal, stat):
         nome_mot = _MAP_STAT_MOTORE.get(r["pronostico"])
         if nome_mot and nome_mot not in stat_pct:
             stat_pct[nome_mot] = r["somma"][2]
-    candidati = ["1X", "12", "X2", "Goal", "No Goal",
+    candidati = ["1X", "X2", "Goal", "No Goal",
                  "Over 1.5", "Under 1.5", "Over 2.5", "Under 2.5", "Over 3.5", "Under 3.5"]
     best = None
     for merc in candidati:
