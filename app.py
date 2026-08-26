@@ -25,6 +25,7 @@ import evidenze
 import segnali
 import racconto
 import statistico
+import snapshot as snapmod
 import backtest as bt
 
 import pandas as pd
@@ -2721,8 +2722,98 @@ def _backtest_una_partita(df, comp_df, riga):
     return ev["prob"], (len(ph), len(pa)), tre
 
 
-def _report_backtest_testo(valutate, saltate, min_storico, tab, tab_tre, cal_sel, merc_sel, tab_roi):
-    """Costruisce un riepilogo TESTUALE del backtest (per copia-incolla rapido)."""
+def _snapshot_prematch_una(df, comp_df, riga):
+    """Costruisce lo snapshot pre-match (feature + target) per UNA partita conclusa,
+    usando solo i dati precedenti (walk-forward). Ritorna (features, target, nh, na) o None."""
+    home = riga["squadra_casa"]
+    away = riga["squadra_trasferta"]
+    data_p = riga["data"]
+    pid = riga.get("id")
+    gc, gt = riga.get("gol_casa"), riga.get("gol_trasferta")
+    if not (_num_ok(gc) and _num_ok(gt)):
+        return None
+    t_liv = _livello_di(riga.get("competizione"), comp_df)
+    t_cat = categoria_di(riga.get("competizione"), comp_df)
+    t_key = _key(riga.get("competizione")) if riga.get("competizione") else None
+    ph = _partite_squadra_evidenze(df, home, data_p, pid, comp_df, t_liv, t_cat, t_key)
+    pa = _partite_squadra_evidenze(df, away, data_p, pid, comp_df, t_liv, t_cat, t_key)
+    if not ph or not pa:
+        return None
+    hcap_h = _handicap_livello(ph, t_liv)
+    hcap_a = _handicap_livello(pa, t_liv)
+    ev = evidenze.costruisci_evidenze(ph, pa, odds=None, hcap_home=hcap_h, hcap_away=hcap_a)
+    sig = segnali.calcola_signal(ev)
+    feat = snapmod.costruisci_snapshot(ph, pa, ev, sig)
+    tgt = snapmod.costruisci_target(gc, gt)
+    return feat, tgt, len(ph), len(pa)
+
+
+def salva_snapshot_prematch(partita_id, data, home, away, competizione, feat, tgt, nh, na):
+    """Salva (upsert) uno snapshot pre-match nella tabella snapshot_prematch."""
+    cli = get_client()
+    if not cli:
+        return False
+    rec = {
+        "partita_id": str(partita_id), "data": str(data) if data is not None else None,
+        "squadra_casa": home, "squadra_trasferta": away,
+        "competizione": competizione,
+        "features_json": json.dumps(feat), "target_json": json.dumps(tgt),
+        "n_home": nh, "n_away": na,
+    }
+    try:
+        esiste = cli.table("snapshot_prematch").select("id").eq(
+            "partita_id", str(partita_id)).execute()
+        if esiste.data:
+            cli.table("snapshot_prematch").update(rec).eq(
+                "partita_id", str(partita_id)).execute()
+        else:
+            cli.table("snapshot_prematch").insert(rec).execute()
+        return True
+    except Exception:
+        return False
+
+
+def genera_snapshot_prematch(df, comp_df, progress=None):
+    """Genera e salva gli snapshot pre-match per TUTTE le partite concluse che non
+    ne hanno ancora uno. Ritorna (creati, saltati). Costruisce il dataset ML nel tempo."""
+    cli = get_client()
+    if not cli or df.empty:
+        return 0, 0
+    # snapshot già presenti
+    gia = set()
+    try:
+        r = cli.table("snapshot_prematch").select("partita_id").execute()
+        gia = {str(x["partita_id"]) for x in (r.data or [])}
+    except Exception:
+        pass
+    # solo partite CONCLUSE (con risultato)
+    concl = df[df["gol_casa"].notna() & df["gol_trasferta"].notna()] if "gol_casa" in df.columns else df.iloc[0:0]
+    creati = saltati = 0
+    righe = list(concl.iterrows())
+    for i, (_, riga) in enumerate(righe):
+        if progress and i % 5 == 0:
+            progress.progress(i / max(1, len(righe)), text=f"Snapshot {i+1}/{len(righe)}…")
+        pid = str(riga.get("id"))
+        if pid in gia:
+            saltati += 1
+            continue
+        try:
+            res = _snapshot_prematch_una(df, comp_df, riga)
+            if res is None:
+                saltati += 1
+                continue
+            feat, tgt, nh, na = res
+            ok = salva_snapshot_prematch(
+                pid, riga.get("data"), riga["squadra_casa"], riga["squadra_trasferta"],
+                _label_da_comp(riga.get("competizione"), comp_df), feat, tgt, nh, na)
+            creati += 1 if ok else 0
+            saltati += 0 if ok else 1
+        except Exception:
+            saltati += 1
+    return creati, saltati
+
+
+
     L = []
     L.append(f"BACKTEST — {datetime.now():%Y-%m-%d %H:%M}")
     L.append(f"Valutate {valutate} partite · saltate {saltate} · storico minimo {min_storico}")
@@ -2818,6 +2909,32 @@ def pagina_backtest(user):
     comp_df = carica_competizioni()
     concluse = df[df["gol_casa"].notna() & df["gol_trasferta"].notna()].copy()
     st.markdown(f"Partite concluse nel database: **{len(concluse)}**")
+
+    # --- snapshot pre-match per il futuro Learning Engine (ML) ---
+    with st.expander("🧠 Dataset Learning Engine (snapshot pre-match)"):
+        st.caption("Salva la 'fotografia' pre-partita (feature calcolate solo con i dati "
+                   "precedenti) più il risultato reale, per ogni partita conclusa. Accumula nel "
+                   "tempo un dataset onesto (walk-forward) per un futuro modello ML. Non modifica "
+                   "nulla dei motori attuali: raccoglie soltanto dati.")
+        n_snap = 0
+        try:
+            _cli = get_client()
+            if _cli:
+                _r = _cli.table("snapshot_prematch").select("id", count="exact").execute()
+                n_snap = _r.count if hasattr(_r, "count") and _r.count is not None else len(_r.data or [])
+        except Exception:
+            n_snap = None
+        if n_snap is not None:
+            st.markdown(f"Snapshot già salvati: **{n_snap}**")
+        if st.button("📸 Genera snapshot mancanti"):
+            _pr = st.progress(0.0, text="Costruzione snapshot…")
+            _c, _s = genera_snapshot_prematch(df, comp_df, _pr)
+            _pr.progress(1.0, text="Completato.")
+            st.success(f"Creati {_c} nuovi snapshot · {_s} saltati "
+                       "(già presenti o storico insufficiente).")
+        st.caption("Suggerimento: rigenera ogni tanto (es. dopo aver inserito nuovi risultati) "
+                   "per far crescere il dataset. Quando avrai molte più partite, da qui "
+                   "costruiremo e valideremo il modello ML.")
 
     # --- diario di bordo: andamento dei backtest salvati nel tempo ---
     snap = carica_backtest_snapshot()

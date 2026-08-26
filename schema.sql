@@ -150,3 +150,22 @@ create table if not exists backtest_snapshot (
     metriche_json text,              -- Brier/baseline/logloss/calib per mercato (JSON)
     nota          text               -- nota libera (es. "dopo correzione lambda")
 );
+
+
+-- Snapshot PRE-MATCH per il futuro Learning Engine (ML).
+-- Ogni riga = fotografia delle feature PRIMA della partita + risultato reale.
+-- Costruito walk-forward: le feature usano SOLO i dati precedenti alla partita.
+-- Serve ad accumulare un dataset di addestramento onesto nel tempo.
+create table if not exists snapshot_prematch (
+    id            uuid primary key default gen_random_uuid(),
+    creato_il     timestamptz default now(),
+    partita_id    text unique,       -- una fotografia per partita (idempotente)
+    data          text,
+    squadra_casa  text,
+    squadra_trasferta text,
+    competizione  text,
+    features_json text,              -- tutte le feature pre-match (JSON)
+    target_json   text,              -- gli esiti reali (gol, 1X2, over, goal) (JSON)
+    n_home        int,               -- storico grezzo casa al momento dello snapshot
+    n_away        int                -- storico grezzo ospite
+);
