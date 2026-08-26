@@ -582,7 +582,7 @@ def upsert_pronostico(record):
 
     _opzionali = ("scheda_json", "riepilogo", "mercato_ragionato", "score_ragionato",
                   "merc_motore", "conf_motore", "merc_statistico", "conf_statistico",
-                  "merc_fusione", "conf_fusione")
+                  "merc_fusione", "conf_fusione", "merc_solo_stat", "conf_solo_stat")
     try:
         _do(record)
     except Exception:
@@ -590,7 +590,8 @@ def upsert_pronostico(record):
         rec2 = {k: v for k, v in record.items()
                 if k not in ("scheda_json", "mercato_ragionato", "score_ragionato",
                              "merc_motore", "conf_motore", "merc_statistico",
-                             "conf_statistico", "merc_fusione", "conf_fusione")}
+                             "conf_statistico", "merc_fusione", "conf_fusione",
+                             "merc_solo_stat", "conf_solo_stat")}
         try:
             _do(rec2)
         except Exception:
@@ -993,6 +994,18 @@ def login_gate():
 # =============================================================================
 #  PAGINA: ESTRATTORE
 # =============================================================================
+def _reset_estrattore():
+    """Pulisce i campi della maschera estrattore per inserire una nuova partita,
+    restando sulla pagina. Chiamata come callback (on_click), così azzera i widget
+    prima che vengano ricreati. Tiene la competizione selezionata (spesso è la stessa)."""
+    for k in ("testo_estrattore", "editor_estrattore",
+              "q1", "q1m", "q2", "q2m", "qx", "qxm",
+              "qo", "qom", "qu", "qum", "qg", "qgm", "qn", "qnm",
+              "fc", "ft", "vc", "vt"):
+        st.session_state.pop(k, None)
+    st.session_state.pop("_estr_salvato", None)
+
+
 def pagina_estrattore(user):
     st.header("📥 Ultimi risultati e quote")
     st.caption("Incolla i blocchi 'ULTIMI INCONTRI' di 2 squadre alla volta, poi rivedi e salva.")
@@ -1274,6 +1287,14 @@ def pagina_estrattore(user):
 
         st.success(f"Salvate {n_salvate} righe. Le vedi nella sezione Database.")
         st.cache_data.clear()
+        st.session_state["_estr_salvato"] = True
+
+    # dopo un salvataggio riuscito: pulsante per inserire subito una nuova partita
+    if st.session_state.get("_estr_salvato"):
+        st.divider()
+        st.caption("Vuoi inserire un'altra partita? Pulisci la maschera e riparti da capo.")
+        st.button("➕ Aggiungi nuova partita", type="primary",
+                  on_click=_reset_estrattore, key="btn_nuova_partita")
 
 
 # =============================================================================
@@ -3628,6 +3649,11 @@ def pagina_analisi(user):
                     fm = racc["fusione_media"]
                     m_fus = fm.get("mercato")
                     c_fus = fm.get("confidence")
+                m_sstat = c_sstat = None
+                if racc and racc.get("solo_statistico"):
+                    ss = racc["solo_statistico"]
+                    m_sstat = ss.get("mercato")
+                    c_sstat = ss.get("confidence")
                 upsert_pronostico({
                     "partita_id": str(row["id"]),
                     "data": str(row["data"]) if "data" in row else None,
@@ -3644,6 +3670,7 @@ def pagina_analisi(user):
                     "merc_motore": m_mot, "conf_motore": c_mot,
                     "merc_statistico": m_stat, "conf_statistico": c_stat,
                     "merc_fusione": m_fus, "conf_fusione": c_fus,
+                    "merc_solo_stat": m_sstat, "conf_solo_stat": c_sstat,
                 })
                 salvati.add(sig)
                 st.caption("💾 Pronostico salvato automaticamente in 📈 Storico pronostici.")
@@ -3805,6 +3832,7 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False):
             pm = racc.get("pronostico") or {}
             ps = racc.get("pronostico_statistico") or {}
             fm = racc.get("fusione_media") or {}
+            ss = racc.get("solo_statistico") or {}
             upd = {
                 "merc_motore": pm.get("mercato"),
                 "conf_motore": int(pm["score"]) if pm.get("score") is not None else None,
@@ -3812,6 +3840,8 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False):
                 "conf_statistico": {"alta": 90, "media": 70, "bassa": 50}.get(ps.get("confidence")),
                 "merc_fusione": fm.get("mercato"),
                 "conf_fusione": fm.get("confidence"),
+                "merc_solo_stat": ss.get("mercato"),
+                "conf_solo_stat": ss.get("confidence"),
             }
             cli.table("pronostici").update(upd).eq("id", r["id"]).execute()
             n += 1
@@ -3881,13 +3911,14 @@ def pagina_storico_pronostici(user):
         mot = _get("merc_motore", "conf_motore")
         sta = _get("merc_statistico", "conf_statistico")
         fus = _get("merc_fusione", "conf_fusione")
+        sstat = _get("merc_solo_stat", "conf_solo_stat")
         # fallback leggero: se manca merc_motore usa il mercato_ragionato salvato
         if not mot[0] and "mercato_ragionato" in pron.columns:
             mr = _txt(r.get("mercato_ragionato"))
             sc = r.get("score_ragionato")
             mot = (mr, int(sc) if sc is not None and not pd.isna(sc) else None)
         if mot[0] or not ricalcola_vecchi:
-            return {"motore": mot, "statistico": sta, "fusione": fus}
+            return {"motore": mot, "statistico": sta, "fusione": fus, "solostat": sstat}
         # ricalcolo al volo SOLO se richiesto esplicitamente
         try:
             pid = _txt(r.get("partita_id"))
@@ -3905,13 +3936,14 @@ def pagina_storico_pronostici(user):
                 ps = racc_r.get("pronostico_statistico") or {}
                 m_sta = (ps.get("pronostico") or "",
                          {"alta": 90, "media": 70, "bassa": 50}.get(ps.get("confidence")))
-                pf = racc_r.get("pronostici_fusi") or []
-                pf0 = pf[0] if pf else {}
-                m_fus = (pf0.get("mercato") or "", pf0.get("confidence"))
-                return {"motore": m_mot, "statistico": m_sta, "fusione": m_fus}
+                fmm = racc_r.get("fusione_media") or {}
+                m_fus = (fmm.get("mercato") or "", fmm.get("confidence"))
+                ssm = racc_r.get("solo_statistico") or {}
+                m_ss = (ssm.get("mercato") or "", ssm.get("confidence"))
+                return {"motore": m_mot, "statistico": m_sta, "fusione": m_fus, "solostat": m_ss}
         except Exception:
             pass
-        return {"motore": mot, "statistico": sta, "fusione": fus}
+        return {"motore": mot, "statistico": sta, "fusione": fus, "solostat": sstat}
 
     def _norm_merc(m):
         """Normalizza i nomi lunghi dello statistico ai mercati verificabili."""
@@ -3930,9 +3962,9 @@ def pagina_storico_pronostici(user):
         cell = {}
         if gc is not None and gt is not None and not (pd.isna(gc) or pd.isna(gt)):
             ris = f"{int(gc)}-{int(gt)}"
-            for eng in ("motore", "fusione"):
+            for eng in ("motore", "fusione", "solostat"):
                 merc, conf = tre[eng]
-                # la fusione a media usa nomi mercato standard; valuta con _pronostico_vinto
+                # tutti usano nomi mercato standard; valuta con _pronostico_vinto
                 won = _pronostico_vinto(_norm_merc(merc), gc, gt) if merc else None
                 if won is True:
                     cell[eng] = "✅"; conteggi[eng][0] += 1
@@ -3942,7 +3974,7 @@ def pagina_storico_pronostici(user):
                     cell[eng] = "—"
         else:
             ris = "in attesa"; aperti += 1
-            for eng in ("motore", "fusione"):
+            for eng in ("motore", "fusione", "solostat"):
                 cell[eng] = ""
         righe.append({
             "Data": r.get("data"), "Casa": r.get("squadra_casa"),
@@ -3953,12 +3985,15 @@ def pagina_storico_pronostici(user):
             "✓M": cell["motore"],
             "🔀 Fusione": tre["fusione"][0] or "—", "Conf. F": tre["fusione"][1],
             "✓F": cell["fusione"],
+            "📊 Statistico": tre["solostat"][0] or "—", "Conf. S": tre["solostat"][1],
+            "✓S": cell["solostat"],
         })
 
     st.markdown("**Riuscita dei pronostici**")
-    cols = st.columns(2)
-    nomi = {"motore": "🎯 Motore", "fusione": "🔀 Fusione (media motore+statistico)"}
-    for i, eng in enumerate(("motore", "fusione")):
+    cols = st.columns(3)
+    nomi = {"motore": "🎯 Motore", "fusione": "🔀 Fusione (motore+statistico)",
+            "solostat": "📊 Statistico (solo dati)"}
+    for i, eng in enumerate(("motore", "fusione", "solostat")):
         v, p = conteggi[eng]
         tot = v + p
         with cols[i]:
