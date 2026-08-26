@@ -998,11 +998,14 @@ def _reset_estrattore():
     """Pulisce i campi della maschera estrattore per inserire una nuova partita,
     restando sulla pagina. Chiamata come callback (on_click), così azzera i widget
     prima che vengano ricreati. Tiene la competizione selezionata (spesso è la stessa)."""
-    for k in ("testo_estrattore", "editor_estrattore",
+    for k in ("editor_estrattore",
               "q1", "q1m", "q2", "q2m", "qx", "qxm",
               "qo", "qom", "qu", "qum", "qg", "qgm", "qn", "qnm",
               "fc", "ft", "vc", "vt"):
         st.session_state.pop(k, None)
+    # il campo testo usa una chiave dinamica: cambiando il nonce nasce un campo VUOTO
+    st.session_state["_estr_nonce"] = st.session_state.get("_estr_nonce", 0) + 1
+    st.session_state.pop("_estr_quote_sig", None)
     st.session_state.pop("_estr_salvato", None)
 
 
@@ -1025,7 +1028,8 @@ def pagina_estrattore(user):
              "Determina categoria e livello usati dal motore. Puoi lasciarla non specificata.")
     comp_target = opz_estr.get(comp_target_lab)
 
-    testo = st.text_area("Incolla qui il testo", height=260, key="testo_estrattore")
+    _nonce = st.session_state.get("_estr_nonce", 0)
+    testo = st.text_area("Incolla qui il testo", height=260, key=f"testo_estrattore_{_nonce}")
 
     if not testo.strip():
         st.info("In attesa del testo…")
