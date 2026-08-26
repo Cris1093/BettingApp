@@ -3954,7 +3954,7 @@ def pagina_storico_pronostici(user):
         return base
 
     righe = []
-    conteggi = {"motore": [0, 0], "fusione": [0, 0]}  # [vinti, persi]
+    conteggi = {"motore": [0, 0], "fusione": [0, 0], "solostat": [0, 0]}  # [vinti, persi]
     aperti = 0
     for _, r in pron.iterrows():
         gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
@@ -4046,6 +4046,9 @@ def pagina_storico_pronostici(user):
             "🔀 Fusione": st.column_config.Column(disabled=True),
             "Conf. F": st.column_config.Column(disabled=True),
             "✓F": st.column_config.Column(disabled=True),
+            "📊 Statistico": st.column_config.Column(disabled=True),
+            "Conf. S": st.column_config.Column(disabled=True),
+            "✓S": st.column_config.Column(disabled=True),
         })
 
     if st.button("💾 Salva risultati e competizioni", type="primary"):

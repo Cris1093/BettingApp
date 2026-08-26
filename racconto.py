@@ -807,6 +807,33 @@ def fusione_media(signal, stat):
     return best[0], round(best[1])
 
 
+def solo_statistico(stat):
+    """Miglior pronostico basato SOLO sui dati statistici, tra gli stessi mercati della
+    fusione a media (1X, X2, Goal/NoGoal, Over/Under 1.5/2.5/3.5). Sceglie la % più alta.
+    Ritorna (mercato, percentuale) o (None, None)."""
+    if not stat:
+        return None, None
+    stat_pct = {}
+    for r in stat.get("tabella", []):
+        if r["tipologia"] != "generale":
+            continue
+        nome_mot = _MAP_STAT_MOTORE.get(r["pronostico"])
+        if nome_mot and nome_mot not in stat_pct:
+            stat_pct[nome_mot] = r["somma"][2]
+    candidati = ["1X", "X2", "Goal", "No Goal",
+                 "Over 1.5", "Under 1.5", "Over 2.5", "Under 2.5", "Over 3.5", "Under 3.5"]
+    best = None
+    for merc in candidati:
+        ps = stat_pct.get(merc)
+        if ps is None:
+            continue
+        if best is None or ps > best[1]:
+            best = (merc, ps)
+    if not best:
+        return None, None
+    return best[0], round(best[1])
+
+
 def racconta(home_name, away_name, ev, signal, competizione=None, statistico=None):
     sezioni = []
     # 💎 GIOCATE DI VALORE — in cima a tutto (regola EV → edge → signal)
@@ -864,9 +891,11 @@ def racconta(home_name, away_name, ev, signal, competizione=None, statistico=Non
             sezioni.append(tab)
     fusi = fondi_due_motori(signal, statistico) if statistico else []
     fus_media_merc, fus_media_conf = fusione_media(signal, statistico) if statistico else (None, None)
+    stat_merc, stat_conf = solo_statistico(statistico) if statistico else (None, None)
     return {"home": home_name, "away": away_name, "sezioni": sezioni,
             "pronostico": pron, "signal": signal,
             "statistico": statistico,
             "pronostico_statistico": (statistico.get("best") if statistico else None),
             "pronostici_fusi": fusi,
-            "fusione_media": {"mercato": fus_media_merc, "confidence": fus_media_conf}}
+            "fusione_media": {"mercato": fus_media_merc, "confidence": fus_media_conf},
+            "solo_statistico": {"mercato": stat_merc, "confidence": stat_conf}}

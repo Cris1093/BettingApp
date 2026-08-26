@@ -67,6 +67,7 @@ create table if not exists pronostici (
     merc_motore     text,   conf_motore     int,   -- motore probabilistico (fuso freq+Poisson)
     merc_statistico text,   conf_statistico int,   -- motore statistico (frequenze grezze)
     merc_fusione    text,   conf_fusione    int,   -- fusione dei due motori (il più sicuro)
+    merc_solo_stat  text,   conf_solo_stat  int,   -- miglior pronostico SOLO statistico
     creato_il    timestamptz default now()
 );
 
