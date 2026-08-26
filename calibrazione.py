@@ -19,10 +19,10 @@ complementare si ricava per coerenza (Under = 100 - Over calibrato).
 #   35->33, 50->39, 67->46, 82->60
 # Over 2.5 (e 3.5): il modello SOVRASTIMAVA -> la curva abbassa. Tarata sul backtest.
 _PUNTI_OVER = [(0, 0), (35, 33), (50, 39), (67, 46), (82, 60), (100, 75)]
-# Over 1.5: al contrario, il modello SOTTOSTIMA -> la curva ALZA le probabilità.
-# Dati backtest (144 partite): dice ~51% -> reale ~67% ; dice ~65% -> reale ~73%.
-# Correzione prudente (non spinge agli estremi, dati ancora pochi).
-_PUNTI_OVER15 = [(0, 5), (35, 45), (50, 62), (65, 72), (80, 82), (100, 95)]
+# Over 1.5: il modello GREZZO sovrastima LEGGERMENTE (raw ~72 -> reale ~67; raw ~88 -> reale
+# ~73). La vecchia curva _PUNTI_OVER abbassava TROPPO. Qui una correzione GENTILE che abbassa
+# di poco, coerente coi dati del backtest (144 partite). Da raffinare con più dati.
+_PUNTI_OVER15 = [(0, 0), (50, 48), (72, 67), (88, 73), (100, 80)]
 # Goal/NoGoal: lieve sovrastima.
 _PUNTI_GOAL = [(0, 0), (40, 36), (55, 46), (65, 50), (80, 63), (100, 80)]
 
