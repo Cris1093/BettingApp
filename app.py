@@ -4094,41 +4094,39 @@ def _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config
 
 
 def genera_pronostici_mancanti(df, comp_df, pron, progress=None):
-    """Genera e salva il pronostico per TUTTE le fixture (is_target) senza pronostico
-    salvato e senza risultato. Ritorna (creati, saltati)."""
+    """Genera e salva il pronostico per le fixture (is_target) senza pronostico salvato.
+    Ritorna (creati, saltati_gia, saltati_dati, primo_errore) per piena trasparenza."""
     if "is_target" not in df.columns:
-        return 0, 0
+        return 0, 0, 0, "colonna is_target assente"
     fixtures = df[df["is_target"] == True]
-    # escludi quelle che hanno già un pronostico salvato
     gia = set()
     if pron is not None and not pron.empty and "partita_id" in pron.columns:
         gia = set(pron["partita_id"].astype(str))
     calibratori = carica_calibrazione()
     livelli = _livelli_da_comp(comp_df)
     config = _config_default()
-    creati = saltati = 0
+    creati = saltati_gia = saltati_dati = 0
+    primo_errore = None
     righe = list(fixtures.iterrows())
     for i, (_, row) in enumerate(righe):
         if progress and i % 3 == 0:
             progress.progress(i / max(1, len(righe)), text=f"Partita {i+1}/{len(righe)}…")
         pid = str(row.get("id"))
-        # salta se ha già un pronostico o se ha già un risultato (è storica)
         if pid in gia:
-            saltati += 1
-            continue
-        if _num_ok(row.get("gol_casa")) and _num_ok(row.get("gol_trasferta")):
-            saltati += 1
+            saltati_gia += 1
             continue
         try:
             rec = _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config)
             if rec is None:
-                saltati += 1
+                saltati_dati += 1
                 continue
             upsert_pronostico(rec)
             creati += 1
-        except Exception:
-            saltati += 1
-    return creati, saltati
+        except Exception as e:
+            saltati_dati += 1
+            if primo_errore is None:
+                primo_errore = str(e)
+    return creati, saltati_gia, saltati_dati, primo_errore
 
 
 def pagina_storico_pronostici(user):
@@ -4162,11 +4160,13 @@ def pagina_storico_pronostici(user):
         st.rerun()
     if st.button("✨ Genera pronostici per le partite in attesa"):
         _pr = st.progress(0.0, text="Generazione in corso…")
-        _creati, _saltati = genera_pronostici_mancanti(
+        _creati, _s_gia, _s_dati, _err = genera_pronostici_mancanti(
             carica_partite(), carica_competizioni(), carica_pronostici(), _pr)
         _pr.progress(1.0, text="Completato.")
-        st.success(f"Creati {_creati} nuovi pronostici · {_saltati} saltati "
-                   "(già presenti o senza dati sufficienti).")
+        st.success(f"Creati e SALVATI {_creati} nuovi pronostici. "
+                   f"Saltati {_s_gia} (già salvati) · {_s_dati} (storico insufficiente).")
+        if _err:
+            st.error(f"⚠️ Alcuni salvataggi non riusciti (primo errore): {_err}")
         st.cache_data.clear()
         st.rerun()
 
