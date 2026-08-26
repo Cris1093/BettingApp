@@ -2749,10 +2749,10 @@ def _snapshot_prematch_una(df, comp_df, riga):
 
 
 def salva_snapshot_prematch(partita_id, data, home, away, competizione, feat, tgt, nh, na):
-    """Salva (upsert) uno snapshot pre-match nella tabella snapshot_prematch."""
+    """Salva (upsert) uno snapshot pre-match. Ritorna (True, None) o (False, messaggio_errore)."""
     cli = get_client()
     if not cli:
-        return False
+        return False, "nessun client Supabase"
     rec = {
         "partita_id": str(partita_id), "data": str(data) if data is not None else None,
         "squadra_casa": home, "squadra_trasferta": away,
@@ -2768,31 +2768,31 @@ def salva_snapshot_prematch(partita_id, data, home, away, competizione, feat, tg
                 "partita_id", str(partita_id)).execute()
         else:
             cli.table("snapshot_prematch").insert(rec).execute()
-        return True
-    except Exception:
+        return True, None
+    except Exception as e:
+        return False, str(e)
         return False
 
 
 def genera_snapshot_prematch(df, comp_df, progress=None):
-    """Genera e salva gli snapshot pre-match per TUTTE le partite concluse che non
-    ne hanno ancora uno. Ritorna (creati, saltati). Costruisce il dataset ML nel tempo."""
+    """Genera e salva gli snapshot pre-match per le fixture pronosticate concluse.
+    Ritorna (creati, saltati, primo_errore)."""
     cli = get_client()
     if not cli or df.empty:
-        return 0, 0
-    # snapshot già presenti
+        return 0, 0, "nessun client o database vuoto"
     gia = set()
     try:
         r = cli.table("snapshot_prematch").select("partita_id").execute()
         gia = {str(x["partita_id"]) for x in (r.data or [])}
-    except Exception:
-        pass
-    # solo fixture PRONOSTICATE (is_target) e CONCLUSE: sono le "vere" partite del dataset
+    except Exception as e:
+        return 0, 0, f"lettura tabella fallita: {e}"
     _mask = df["gol_casa"].notna() & df["gol_trasferta"].notna()
     if "is_target" in df.columns:
         concl = df[_mask & (df["is_target"] == True)]
     else:
         concl = df[_mask] if "gol_casa" in df.columns else df.iloc[0:0]
     creati = saltati = 0
+    primo_errore = None
     righe = list(concl.iterrows())
     for i, (_, riga) in enumerate(righe):
         if progress and i % 5 == 0:
@@ -2805,16 +2805,24 @@ def genera_snapshot_prematch(df, comp_df, progress=None):
             res = _snapshot_prematch_una(df, comp_df, riga)
             if res is None:
                 saltati += 1
+                if primo_errore is None:
+                    primo_errore = "storico insufficiente per alcune partite"
                 continue
             feat, tgt, nh, na = res
-            ok = salva_snapshot_prematch(
+            ok, err = salva_snapshot_prematch(
                 pid, riga.get("data"), riga["squadra_casa"], riga["squadra_trasferta"],
                 _label_da_comp(riga.get("competizione"), comp_df), feat, tgt, nh, na)
-            creati += 1 if ok else 0
-            saltati += 0 if ok else 1
-        except Exception:
+            if ok:
+                creati += 1
+            else:
+                saltati += 1
+                if primo_errore is None and err:
+                    primo_errore = err
+        except Exception as e:
             saltati += 1
-    return creati, saltati
+            if primo_errore is None:
+                primo_errore = str(e)
+    return creati, saltati, primo_errore
 
 
 
@@ -2943,10 +2951,11 @@ def pagina_backtest(user):
             st.markdown(f"Snapshot già salvati: **{n_snap}**")
         if st.button("📸 Genera snapshot mancanti"):
             _pr = st.progress(0.0, text="Costruzione snapshot…")
-            _c, _s = genera_snapshot_prematch(df, comp_df, _pr)
+            _c, _s, _err = genera_snapshot_prematch(df, comp_df, _pr)
             _pr.progress(1.0, text="Completato.")
-            st.success(f"Creati {_c} nuovi snapshot · {_s} saltati "
-                       "(già presenti o storico insufficiente).")
+            st.success(f"Creati {_c} nuovi snapshot · {_s} saltati.")
+            if _err:
+                st.error(f"⚠️ Motivo dei saltati (primo errore): {_err}")
         st.caption("Suggerimento: rigenera ogni tanto (es. dopo aver inserito nuovi risultati) "
                    "per far crescere il dataset. Quando avrai molte più partite, da qui "
                    "costruiremo e valideremo il modello ML.")
