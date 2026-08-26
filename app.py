@@ -3855,6 +3855,140 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False):
     return n
 
 
+def _config_default():
+    """Pesi di default del modello (gli stessi valori iniziali degli slider in Analisi)."""
+    return {
+        "recency_decay": 45, "home_adv_goals": 1.08, "over": {"h2h": 0.10},
+        "pesi_competizione": {
+            "Campionato": 1.00, "Playoff": 1.00,
+            "Coppa nazionale": 0.85, "Coppa internazionale": 0.85,
+            "Coppa/torneo secondario": 0.75, "Altro": 0.75, "Amichevole": 0.35,
+        },
+        "blending_mercato": False, "peso_mercato": 0.0,
+    }
+
+
+def _livelli_da_comp(comp_df):
+    livelli = {}
+    if comp_df is not None and not comp_df.empty and "livello" in comp_df:
+        for _, cc in comp_df.iterrows():
+            liv = cc.get("livello")
+            if liv is None or (isinstance(liv, float) and liv != liv):
+                continue
+            for kk in _chiavi_competizione(cc):
+                livelli[kk] = int(liv)
+    return livelli
+
+
+def _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config):
+    """Calcola il record completo del pronostico per una fixture (senza salvarlo).
+    Replica esattamente ciò che fa il salvataggio automatico nella pagina Analisi.
+    Ritorna il dict pronto per upsert_pronostico, o None se dati insufficienti."""
+    home, away = row["squadra_casa"], row["squadra_trasferta"]
+    odds = _eff_odds(row)
+    data_partita = row.get("data")
+    rose = (row.get("val_casa"), row.get("val_trasferta"))
+    tp = row.get("tipo_partita")
+    tipo_target = tp if (tp and str(tp) not in ("ND", "Non assegnata", "None")) else None
+    variazioni = {}
+    for kk in ("1", "x", "2", "over", "under", "goal", "nogoal"):
+        v = row.get(f"variazione_quota_{kk}")
+        if v is not None and not (pd.isna(v) if hasattr(pd, "isna") else False):
+            mapk = {"x": "X", "over": "over25", "under": "under25"}.get(kk, kk)
+            variazioni[mapk] = float(v)
+
+    a = analisi.analizza_partita(home, away, df, odds=odds, data_partita=data_partita,
+                                 config=config, calibratori=calibratori, rose=rose,
+                                 tipo_partita_target=tipo_target, livelli=livelli,
+                                 variazioni=variazioni)
+    if a.get("errore"):
+        return None
+
+    comp_target = _label_da_comp(row.get("competizione"), comp_df)
+    racc = analisi_ragionata(df, home, away, data_partita=data_partita, odds=odds,
+                             variazioni=variazioni, escludi_id=row.get("id"),
+                             competizione=comp_target)
+    p = a["prob"]
+    best = a["best"]
+    testo = riepilogo_testo(a, df, home, away, odds, row=row)
+
+    merc_rag = score_rag = None
+    if racc and racc.get("pronostico"):
+        merc_rag = racc["pronostico"].get("mercato")
+        score_rag = racc["pronostico"].get("score")
+    m_stat = c_stat = None
+    if racc and racc.get("pronostico_statistico"):
+        ps = racc["pronostico_statistico"]
+        m_stat = ps.get("pronostico")
+        c_stat = {"alta": 90, "media": 70, "bassa": 50}.get(ps.get("confidence"))
+    m_fus = c_fus = None
+    if racc and racc.get("fusione_media"):
+        m_fus = racc["fusione_media"].get("mercato")
+        c_fus = racc["fusione_media"].get("confidence")
+    m_sstat = c_sstat = None
+    if racc and racc.get("solo_statistico"):
+        m_sstat = racc["solo_statistico"].get("mercato")
+        c_sstat = racc["solo_statistico"].get("confidence")
+
+    return {
+        "partita_id": str(row["id"]),
+        "data": str(data_partita) if data_partita is not None else None,
+        "squadra_casa": home, "squadra_trasferta": away,
+        "mercato": best["mercato"], "prob": float(best["prob"]),
+        "confidence": float(best["confidence"]),
+        "quota": float(best["quota"]) if best.get("quota") else None,
+        "prob_over25": float(a["over_prob"]), "prob_goal": float(a["btts_prob"]),
+        "prob_1": float(p["1"]), "prob_x": float(p["X"]), "prob_2": float(p["2"]),
+        "riepilogo": testo,
+        "scheda_json": json.dumps(_snapshot_analisi(a, odds)),
+        "mercato_ragionato": merc_rag,
+        "score_ragionato": int(score_rag) if score_rag is not None else None,
+        "merc_motore": merc_rag,
+        "conf_motore": int(score_rag) if score_rag is not None else None,
+        "merc_statistico": m_stat, "conf_statistico": c_stat,
+        "merc_fusione": m_fus, "conf_fusione": c_fus,
+        "merc_solo_stat": m_sstat, "conf_solo_stat": c_sstat,
+    }
+
+
+def genera_pronostici_mancanti(df, comp_df, pron, progress=None):
+    """Genera e salva il pronostico per TUTTE le fixture (is_target) senza pronostico
+    salvato e senza risultato. Ritorna (creati, saltati)."""
+    if "is_target" not in df.columns:
+        return 0, 0
+    fixtures = df[df["is_target"] == True]
+    # escludi quelle che hanno già un pronostico salvato
+    gia = set()
+    if pron is not None and not pron.empty and "partita_id" in pron.columns:
+        gia = set(pron["partita_id"].astype(str))
+    calibratori = carica_calibrazione()
+    livelli = _livelli_da_comp(comp_df)
+    config = _config_default()
+    creati = saltati = 0
+    righe = list(fixtures.iterrows())
+    for i, (_, row) in enumerate(righe):
+        if progress and i % 3 == 0:
+            progress.progress(i / max(1, len(righe)), text=f"Partita {i+1}/{len(righe)}…")
+        pid = str(row.get("id"))
+        # salta se ha già un pronostico o se ha già un risultato (è storica)
+        if pid in gia:
+            saltati += 1
+            continue
+        if _num_ok(row.get("gol_casa")) and _num_ok(row.get("gol_trasferta")):
+            saltati += 1
+            continue
+        try:
+            rec = _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config)
+            if rec is None:
+                saltati += 1
+                continue
+            upsert_pronostico(rec)
+            creati += 1
+        except Exception:
+            saltati += 1
+    return creati, saltati
+
+
 def pagina_storico_pronostici(user):
     st.header("📈 Storico pronostici")
     st.caption("I pronostici salvati prima della partita, confrontati col risultato reale. "
@@ -3883,6 +4017,15 @@ def pagina_storico_pronostici(user):
         _n = backfill_tre_motori(_pron, carica_partite(), carica_competizioni(), _pr, forza=True)
         _pr.progress(1.0, text="Completato.")
         st.success(f"Ricalcolati {_n} pronostici (motore + fusione a media).")
+        st.rerun()
+    if st.button("✨ Genera pronostici per le partite in attesa"):
+        _pr = st.progress(0.0, text="Generazione in corso…")
+        _creati, _saltati = genera_pronostici_mancanti(
+            carica_partite(), carica_competizioni(), carica_pronostici(), _pr)
+        _pr.progress(1.0, text="Completato.")
+        st.success(f"Creati {_creati} nuovi pronostici · {_saltati} saltati "
+                   "(già presenti o senza dati sufficienti).")
+        st.cache_data.clear()
         st.rerun()
 
     pron = carica_pronostici()
@@ -4031,6 +4174,25 @@ def pagina_storico_pronostici(user):
     comp_opts = [comp_opts[0]] + sorted(comp_opts[1:], key=lambda x: x.lower())
 
     tab = pd.DataFrame(righe)
+
+    # --- filtro per data (calendario) ---
+    if "Data" in tab.columns and not tab.empty:
+        _date = pd.to_datetime(tab["Data"], errors="coerce")
+        dmin = _date.min()
+        dmax = _date.max()
+        if pd.notna(dmin) and pd.notna(dmax):
+            with st.expander("📅 Filtra per data"):
+                usa_filtro = st.checkbox("Attiva filtro per data", value=False,
+                                         key="storico_usa_data")
+                intervallo = st.date_input(
+                    "Intervallo (da – a)", value=(dmin.date(), dmax.date()),
+                    min_value=dmin.date(), max_value=dmax.date(), key="storico_range_data")
+                if usa_filtro and isinstance(intervallo, (list, tuple)) and len(intervallo) == 2:
+                    d_da, d_a = intervallo
+                    mask = (_date.dt.date >= d_da) & (_date.dt.date <= d_a)
+                    tab = tab[mask].reset_index(drop=True)
+                    st.caption(f"Mostro {len(tab)} pronostici dal {d_da:%d/%m/%Y} al {d_a:%d/%m/%Y}.")
+
     st.markdown("**Inserisci risultati e competizioni** direttamente qui (formato risultato: "
                 "`1-1`, `2-0`…). Poi premi Salva. Le colonne dei pronostici non sono modificabili.")
     edit = st.data_editor(
