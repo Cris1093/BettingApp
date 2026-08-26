@@ -2786,8 +2786,12 @@ def genera_snapshot_prematch(df, comp_df, progress=None):
         gia = {str(x["partita_id"]) for x in (r.data or [])}
     except Exception:
         pass
-    # solo partite CONCLUSE (con risultato)
-    concl = df[df["gol_casa"].notna() & df["gol_trasferta"].notna()] if "gol_casa" in df.columns else df.iloc[0:0]
+    # solo fixture PRONOSTICATE (is_target) e CONCLUSE: sono le "vere" partite del dataset
+    _mask = df["gol_casa"].notna() & df["gol_trasferta"].notna()
+    if "is_target" in df.columns:
+        concl = df[_mask & (df["is_target"] == True)]
+    else:
+        concl = df[_mask] if "gol_casa" in df.columns else df.iloc[0:0]
     creati = saltati = 0
     righe = list(concl.iterrows())
     for i, (_, riga) in enumerate(righe):
@@ -2907,8 +2911,17 @@ def pagina_backtest(user):
         st.info("Nessuna partita nel database.")
         return
     comp_df = carica_competizioni()
-    concluse = df[df["gol_casa"].notna() & df["gol_trasferta"].notna()].copy()
-    st.markdown(f"Partite concluse nel database: **{len(concluse)}**")
+    # SOLO le fixture pronosticate (is_target) con risultato: sono le "vere" partite del
+    # dataset. Le altre partite concluse sono lo STORICO incollato (materiale grezzo per
+    # calcolare i pronostici), non vanno valutate né usate come campione.
+    _conclmask = df["gol_casa"].notna() & df["gol_trasferta"].notna()
+    if "is_target" in df.columns:
+        concluse = df[_conclmask & (df["is_target"] == True)].copy()
+    else:
+        concluse = df[_conclmask].copy()
+    st.markdown(f"Partite pronosticate concluse (valutabili): **{len(concluse)}**")
+    st.caption("Sono le fixture che hai pronosticato e che poi hanno avuto un risultato. "
+               "Lo storico incollato per calcolare i pronostici non entra nel campione.")
 
     # --- snapshot pre-match per il futuro Learning Engine (ML) ---
     with st.expander("🧠 Dataset Learning Engine (snapshot pre-match)"):
