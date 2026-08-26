@@ -17,19 +17,23 @@ complementare si ricava per coerenza (Under = 100 - Over calibrato).
 # punti di calibrazione osservati (prob dichiarata % -> prob reale %), dal backtest.
 # Fonte Over 2.5 (tabella calibrazione a 128 partite):
 #   35->33, 50->39, 67->46, 82->60
+# Over 2.5 (e 3.5): il modello SOVRASTIMAVA -> la curva abbassa. Tarata sul backtest.
 _PUNTI_OVER = [(0, 0), (35, 33), (50, 39), (67, 46), (82, 60), (100, 75)]
-# Goal/NoGoal: miscalibrazione simile ma un po' meno marcata (CalibErr 11 vs 13);
-# uso una correzione leggermente più tenue.
+# Over 1.5: al contrario, il modello SOTTOSTIMA -> la curva ALZA le probabilità.
+# Dati backtest (144 partite): dice ~51% -> reale ~67% ; dice ~65% -> reale ~73%.
+# Correzione prudente (non spinge agli estremi, dati ancora pochi).
+_PUNTI_OVER15 = [(0, 5), (35, 45), (50, 62), (65, 72), (80, 82), (100, 95)]
+# Goal/NoGoal: lieve sovrastima.
 _PUNTI_GOAL = [(0, 0), (40, 36), (55, 46), (65, 50), (80, 63), (100, 80)]
 
 # quali mercati calibrare e con quale curva (il "lato positivo" del gruppo)
 _GRUPPI = {
     "Over 2.5": ("_PUNTI_OVER", "Under 2.5"),
-    "Over 1.5": ("_PUNTI_OVER", "Under 1.5"),
+    "Over 1.5": ("_PUNTI_OVER15", "Under 1.5"),
     "Over 3.5": ("_PUNTI_OVER", "Under 3.5"),
     "Goal": ("_PUNTI_GOAL", "No Goal"),
 }
-_CURVE = {"_PUNTI_OVER": _PUNTI_OVER, "_PUNTI_GOAL": _PUNTI_GOAL}
+_CURVE = {"_PUNTI_OVER": _PUNTI_OVER, "_PUNTI_OVER15": _PUNTI_OVER15, "_PUNTI_GOAL": _PUNTI_GOAL}
 
 # mercati 1X2: ben calibrati, nessuna correzione
 _NON_CALIBRARE = {"1", "X", "2", "1X", "X2", "12"}
