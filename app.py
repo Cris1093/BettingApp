@@ -2712,10 +2712,11 @@ def _backtest_una_partita(df, comp_df, riga):
     sig = segnali.calcola_signal(ev)
     stat = statistico.analizza(ph, pa)
     racc = racconto.racconta(home, away, ev, sig, statistico=stat)
+    # stessi tre motori dello Storico: motore, fusione a media, solo statistico
     tre = {
         "motore": (racc.get("pronostico") or {}).get("mercato"),
-        "statistico": (racc.get("pronostico_statistico") or {}).get("pronostico"),
-        "fusione": (racc.get("pronostici_fusi") or [{}])[0].get("mercato") if racc.get("pronostici_fusi") else None,
+        "fusione": (racc.get("fusione_media") or {}).get("mercato"),
+        "statistico": (racc.get("solo_statistico") or {}).get("mercato"),
     }
     return ev["prob"], (len(ph), len(pa)), tre
 
