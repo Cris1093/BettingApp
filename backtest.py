@@ -16,15 +16,19 @@ import math
 
 
 def esito_over(gc, gt):     return 1 if (gc + gt) >= 3 else 0
+def esito_over15(gc, gt):   return 1 if (gc + gt) >= 2 else 0
+def esito_over35(gc, gt):   return 1 if (gc + gt) >= 4 else 0
 def esito_goal(gc, gt):     return 1 if (gc >= 1 and gt >= 1) else 0
 def esito_1(gc, gt):        return 1 if gc > gt else 0
 def esito_x(gc, gt):        return 1 if gc == gt else 0
 def esito_2(gc, gt):        return 1 if gc < gt else 0
 
 
-# mercati binari valutati (nome -> funzione esito, chiave prob nel dict del motore)
+# mercati binari valutati (nome -> chiave prob nel dict del motore, funzione esito)
 MERCATI_BINARI = {
+    "Over 1.5": ("Over 1.5", esito_over15),
     "Over 2.5": ("Over 2.5", esito_over),
+    "Over 3.5": ("Over 3.5", esito_over35),
     "Goal": ("Goal", esito_goal),
     "1": ("1", esito_1),
     "X": ("X", esito_x),

@@ -2826,7 +2826,7 @@ def genera_snapshot_prematch(df, comp_df, progress=None):
 
 
 
-def _report_backtest_testo(valutate, saltate, min_storico, tab, tab_tre, cal_sel, merc_sel, tab_roi):
+def _report_backtest_testo(valutate, saltate, min_storico, tab, tab_tre, cal_sel, merc_sel, tab_roi, cal_tutti=None):
     """Costruisce un riepilogo TESTUALE del backtest (per copia-incolla rapido)."""
     L = []
     L.append(f"BACKTEST — {datetime.now():%Y-%m-%d %H:%M}")
@@ -2843,10 +2843,18 @@ def _report_backtest_testo(valutate, saltate, min_storico, tab, tab_tre, cal_sel
         L.append(f"  {r['Motore']:14s} valutati {r['Pronostici valutati']:4d}  "
                  f"azzeccati {r['Azzeccati']:4d}  riuscita {r['Riuscita %']}%")
     L.append("")
-    L.append(f"CALIBRAZIONE ({merc_sel}):")
-    for r in cal_sel:
-        L.append(f"  fascia {r['fascia']:8s} N={r['n']:4d}  prob media {r['prob_media']}%  "
-                 f"reale {r['reale']}%  scarto {r['scarto']}pt")
+    if cal_tutti:
+        L.append("CALIBRAZIONE (tutti i mercati):")
+        for merc, cal in cal_tutti.items():
+            L.append(f"  [{merc}]")
+            for r in cal:
+                L.append(f"    fascia {r['fascia']:8s} N={r['n']:4d}  prob media {r['prob_media']}%  "
+                         f"reale {r['reale']}%  scarto {r['scarto']}pt")
+    else:
+        L.append(f"CALIBRAZIONE ({merc_sel}):")
+        for r in cal_sel:
+            L.append(f"  fascia {r['fascia']:8s} N={r['n']:4d}  prob media {r['prob_media']}%  "
+                     f"reale {r['reale']}%  scarto {r['scarto']}pt")
     if tab_roi:
         L.append("")
         L.append("REDDITIVITÀ (dove ci sono quote):")
@@ -3140,7 +3148,14 @@ def pagina_backtest(user):
     # ---- ESPORTAZIONE: PDF + testo copiabile ----
     st.divider()
     st.subheader("📄 Esporta risultati")
-    testo = _report_backtest_testo(valutate, saltate, min_storico, tab, tab_tre, cal, merc_sel, tab_roi)
+    # calibrazione di TUTTI i mercati (per l'esportazione completa, senza toccare il menu)
+    cal_tutti = {}
+    for m in bt.MERCATI_BINARI:
+        c = bt.calibration(dati[m], n_bin=5)
+        if c:
+            cal_tutti[m] = c
+    testo = _report_backtest_testo(valutate, saltate, min_storico, tab, tab_tre, cal, merc_sel,
+                                   tab_roi, cal_tutti)
     ce = st.columns(2)
     try:
         pdf_bytes = _report_backtest_pdf(valutate, saltate, min_storico, tab, tab_tre, cal, merc_sel, tab_roi)
