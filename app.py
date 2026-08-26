@@ -2818,6 +2818,8 @@ def genera_snapshot_prematch(df, comp_df, progress=None):
 
 
 
+def _report_backtest_testo(valutate, saltate, min_storico, tab, tab_tre, cal_sel, merc_sel, tab_roi):
+    """Costruisce un riepilogo TESTUALE del backtest (per copia-incolla rapido)."""
     L = []
     L.append(f"BACKTEST — {datetime.now():%Y-%m-%d %H:%M}")
     L.append(f"Valutate {valutate} partite · saltate {saltate} · storico minimo {min_storico}")
