@@ -2692,7 +2692,7 @@ def carica_backtest_snapshot():
         return pd.DataFrame()
 
 
-def _backtest_una_partita(df, comp_df, riga):
+def _backtest_una_partita(df, comp_df, riga, recency_decay=None):
     """Ricostruisce la probabilità pre-partita per UNA partita conclusa, usando solo i
     dati precedenti (walk-forward). Ritorna (prob, (nh,na), tre_pick) o None.
     tre_pick = {'motore':merc, 'statistico':merc, 'fusione':merc}."""
@@ -2703,8 +2703,8 @@ def _backtest_una_partita(df, comp_df, riga):
     t_liv = _livello_di(riga.get("competizione"), comp_df)
     t_cat = categoria_di(riga.get("competizione"), comp_df)
     t_key = _key(riga.get("competizione")) if riga.get("competizione") else None
-    ph = _partite_squadra_evidenze(df, home, data_p, pid, comp_df, t_liv, t_cat, t_key)
-    pa = _partite_squadra_evidenze(df, away, data_p, pid, comp_df, t_liv, t_cat, t_key)
+    ph = _partite_squadra_evidenze(df, home, data_p, pid, comp_df, t_liv, t_cat, t_key, recency_decay)
+    pa = _partite_squadra_evidenze(df, away, data_p, pid, comp_df, t_liv, t_cat, t_key, recency_decay)
     if not ph or not pa:
         return None
     hcap_h = _handicap_livello(ph, t_liv)
@@ -3003,6 +3003,15 @@ def pagina_backtest(user):
                                    "almeno questo numero di partite precedenti.")
     max_part = c[1].slider("Max partite da valutare", 50, 1000, 300, step=50,
                            help="Limita il calcolo (le più recenti). Più alto = più lento.")
+    c2 = st.columns(2)
+    usa_recency = c2[0].checkbox("Attiva decadimento temporale (recency)", value=False,
+                                 help="Pesa di più le partite recenti. Provalo e confronta "
+                                      "il risultato con/senza per vedere se aiuta.")
+    recency_gg = c2[1].slider("Decadimento (giorni)", 20, 180, 60, step=10,
+                              disabled=not usa_recency,
+                              help="Più basso = più peso alle partite recentissime. "
+                                   "peso = exp(-giorni/decadimento).")
+    recency_decay = recency_gg if usa_recency else None
 
     if not st.button("▶️ Esegui backtest", type="primary"):
         return
@@ -3024,7 +3033,7 @@ def pagina_backtest(user):
             prog.progress(i / max(1, len(righe)), text=f"Partita {i+1}/{len(righe)}…")
         try:
             gc, gt = int(r["gol_casa"]), int(r["gol_trasferta"])
-            res = _backtest_una_partita(df, comp_df, r)
+            res = _backtest_una_partita(df, comp_df, r, recency_decay)
             if not res:
                 saltate += 1
                 continue
@@ -3478,13 +3487,23 @@ def _livello_di(codice, comp_df):
     return None
 
 
+def _giorni_tra(d1, d2):
+    """Giorni tra due date (stringhe ISO o simili). None se non calcolabile."""
+    try:
+        a = pd.to_datetime(d1); b = pd.to_datetime(d2)
+        return abs((a - b).days)
+    except Exception:
+        return None
+
+
 def _partite_squadra_evidenze(df, team, prima_di=None, escludi_id=None,
                               comp_df=None, target_livello=None, target_categoria=None,
-                              target_comp_key=None):
+                              target_comp_key=None, recency_decay=None):
     """Estrae le partite giocate di una squadra nel formato del nuovo motore
     (gf/gs dal suo punto di vista, casa True/False, peso), dalla più recente. Filtra per
     data < prima_di e ESCLUDE la fixture stessa. Assegna a ogni partita un PESO in base
-    al contesto (amichevole/categoria/competizione) relativo alla partita da pronosticare."""
+    al contesto (competizione) e, se recency_decay è dato, anche al DECADIMENTO temporale
+    rispetto alla data della fixture: peso_recency = exp(-giorni/decay)."""
     if df.empty:
         return []
     d = df[(df["squadra_casa"] == team) | (df["squadra_trasferta"] == team)]
@@ -3498,13 +3517,19 @@ def _partite_squadra_evidenze(df, team, prima_di=None, escludi_id=None,
             pass
     if "data" in d.columns:
         d = d.sort_values("data", ascending=False)
+    import math as _math
     out = []
     for _, m in d.iterrows():
         peso, motivo = 1.0, None
         if comp_df is not None:
             peso, motivo = _peso_partita(m.get("competizione"), comp_df,
                                          target_livello, target_categoria, target_comp_key)
-        rec = {"peso": peso, "motivo_peso": motivo,
+        # decadimento temporale (opzionale): pesa di più le partite recenti
+        if recency_decay and prima_di is not None and "data" in m:
+            gg = _giorni_tra(m.get("data"), prima_di)
+            if gg is not None:
+                peso = peso * _math.exp(-gg / float(recency_decay))
+        rec = {"peso": peso, "motivo_peso": motivo, "data": m.get("data"),
                "livello": _livello_di(m.get("competizione"), comp_df) if comp_df is not None else None}
         if m["squadra_casa"] == team:
             rec.update({"gf": int(m["gol_casa"]), "gs": int(m["gol_trasferta"]), "casa": True})
@@ -3537,15 +3562,15 @@ def _handicap_livello(partite, target_livello):
     return max(0.55, 1.0 - 0.28 * diff)   # ogni livello sotto -> ~28% di handicap
 
 
-def analisi_ragionata(df, home, away, data_partita=None, odds=None, variazioni=None, escludi_id=None, competizione=None):
+def analisi_ragionata(df, home, away, data_partita=None, odds=None, variazioni=None, escludi_id=None, competizione=None, recency_decay=None):
     """Ponte verso il nuovo motore: evidenze -> signal score -> racconto.
     Ritorna il dict del racconto, oppure None se manca lo storico."""
     comp_df = carica_competizioni()
     t_liv = _livello_di(competizione, comp_df) if competizione else None
     t_cat = categoria_di(competizione, comp_df) if competizione else None
     t_key = _key(competizione) if competizione else None
-    ph = _partite_squadra_evidenze(df, home, data_partita, escludi_id, comp_df, t_liv, t_cat, t_key)
-    pa = _partite_squadra_evidenze(df, away, data_partita, escludi_id, comp_df, t_liv, t_cat, t_key)
+    ph = _partite_squadra_evidenze(df, home, data_partita, escludi_id, comp_df, t_liv, t_cat, t_key, recency_decay)
+    pa = _partite_squadra_evidenze(df, away, data_partita, escludi_id, comp_df, t_liv, t_cat, t_key, recency_decay)
     if not ph or not pa:
         return None
     hcap_h = _handicap_livello(ph, t_liv)
@@ -3704,30 +3729,21 @@ def pagina_analisi(user):
         st.warning("Seleziona due squadre diverse.")
         return
 
-    # --- pesi configurabili ---
+    # --- pesi configurabili (nuovo motore) ---
     with st.expander("⚙️ Pesi del modello"):
-        cc = st.columns(3)
-        decay = cc[0].slider("Recency decay (giorni)", 15, 120, 45, 5,
-                             help="Più basso = più peso alle partite recentissime.")
-        hadv = cc[1].slider("Vantaggio campo (xG)", 1.00, 1.25, 1.08, 0.01)
-        h2h_w = cc[2].slider("Peso H2H (Over)", 0.0, 0.30, 0.10, 0.05)
-        st.caption("Peso per tipo di competizione (1.00 = conta pieno):")
-        cc = st.columns(4)
-        w_camp = cc[0].slider("Campionato", 0.0, 1.0, 1.00, 0.05)
-        w_coppa = cc[1].slider("Coppe", 0.0, 1.0, 0.85, 0.05)
-        w_sec = cc[2].slider("Torneo second.", 0.0, 1.0, 0.75, 0.05)
-        w_ami = cc[3].slider("Amichevole", 0.0, 1.0, 0.35, 0.05)
+        usa_rec = st.checkbox("Decadimento temporale (pesa di più le partite recenti)",
+                              value=False, key="an_usa_recency")
+        decay_gg = st.slider("Decadimento (giorni)", 20, 180, 60, step=10,
+                             disabled=not usa_rec, key="an_recency",
+                             help="Più basso = più peso alle partite recentissime. "
+                                  "peso = exp(-giorni/decadimento). Testa l'effetto nel Backtest.")
+        an_recency = decay_gg if usa_rec else None
+        st.caption("Il tipo di competizione pesa già le partite (campionato conta più di "
+                   "un'amichevole). Il decadimento aggiunge il peso della recency.")
         st.caption("Le quote NON mediano la probabilità: servono solo a segnalare le "
                    "discrepanze (alert) e a modulare la confidence.")
-    config = {
-        "recency_decay": decay, "home_adv_goals": hadv, "over": {"h2h": h2h_w},
-        "pesi_competizione": {
-            "Campionato": w_camp, "Playoff": w_camp,
-            "Coppa nazionale": w_coppa, "Coppa internazionale": w_coppa,
-            "Coppa/torneo secondario": w_sec, "Altro": w_sec, "Amichevole": w_ami,
-        },
-        "blending_mercato": False, "peso_mercato": 0.0,
-    }
+    # il vecchio motore usa ancora alcuni campi: config con i default consolidati
+    config = _config_default()
 
     calibratori = carica_calibrazione()
     # livelli di lega dalle competizioni (per Elo consapevole della divisione)
@@ -3774,7 +3790,7 @@ def pagina_analisi(user):
     racc = analisi_ragionata(df, home, away, data_partita=data_partita,
                              odds=odds, variazioni=variazioni,
                              escludi_id=(row.get("id") if not pend.empty else None),
-                             competizione=comp_target)
+                             competizione=comp_target, recency_decay=an_recency)
     render_racconto_st(racc)
 
     # (motore fuso: la visualizzazione è la sola "Analisi ragionata" sopra;
