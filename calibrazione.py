@@ -26,6 +26,12 @@ _PUNTI_OVER15 = [(0, 0), (50, 48), (72, 67), (88, 73), (100, 80)]
 # Goal/NoGoal: lieve sovrastima.
 _PUNTI_GOAL = [(0, 0), (40, 36), (55, 46), (65, 50), (80, 63), (100, 80)]
 
+# "2" (vittoria ospite): il modello SOVRASTIMA nella fascia dove si gioca (dice ~30 -> reale
+# ~22), causando false opportunità di value. Curva che ABBASSA il 2 in quella fascia.
+# La fascia 40-60% (dice 48 -> reale 75) ha pochissimi dati (N=12): NON la inseguo, resto
+# prudente. La differenza tolta al 2 viene ridistribuita su 1 e X (vedi calibra_prob).
+_PUNTI_2 = [(0, 0), (17, 18), (30, 22), (40, 33), (60, 58), (100, 100)]
+
 # quali mercati calibrare e con quale curva (il "lato positivo" del gruppo)
 _GRUPPI = {
     "Over 2.5": ("_PUNTI_OVER", "Under 2.5"),
@@ -56,11 +62,14 @@ def _interp(x, punti):
 
 def calibra_prob(prob):
     """Applica la calibrazione a un dizionario {mercato: prob%}. Ritorna un NUOVO dizionario
-    con le probabilità dei mercati gol corrette e i complementari ricoerenziati.
-    L'1X2 resta invariato. Idempotente sui mercati non gestiti."""
+    con le probabilità corrette e i complementari ricoerenziati.
+    - mercati gol (Over/Under, Goal): calibrati a coppie.
+    - "2" (1X2): calibrato e la differenza ridistribuita su 1 e X (somma 1+X+2 = 100).
+    L'1 e la X non vengono toccati direttamente (erano ben calibrati)."""
     if not prob:
         return prob
     out = dict(prob)
+    # gruppi a coppie (gol)
     for pos, (curva_key, neg) in _GRUPPI.items():
         if pos in out and out[pos] is not None:
             grezza = out[pos]
@@ -68,6 +77,23 @@ def calibra_prob(prob):
             out[pos] = round(cal, 2)
             if neg in out:
                 out[neg] = round(100.0 - cal, 2)
+    # "2" nel gruppo 1X2: abbassa e ridistribuisci su 1 e X proporzionalmente
+    if all(k in out and out[k] is not None for k in ("1", "X", "2")):
+        due_grezzo = out["2"]
+        due_cal = _interp(due_grezzo, _PUNTI_2)
+        delta = due_grezzo - due_cal          # quanto tolgo al 2 (positivo se abbasso)
+        uno, ics = out["1"], out["X"]
+        base = uno + ics
+        if base > 0 and abs(delta) > 1e-9:
+            out["2"] = round(due_cal, 2)
+            out["1"] = round(uno + delta * (uno / base), 2)
+            out["X"] = round(ics + delta * (ics / base), 2)
+            # normalizzazione di sicurezza (somma esatta a 100)
+            s = out["1"] + out["X"] + out["2"]
+            if s > 0:
+                out["1"] = round(out["1"] * 100.0 / s, 2)
+                out["X"] = round(out["X"] * 100.0 / s, 2)
+                out["2"] = round(out["2"] * 100.0 / s, 2)
     return out
 
 
