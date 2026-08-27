@@ -2692,7 +2692,7 @@ def carica_backtest_snapshot():
         return pd.DataFrame()
 
 
-def _backtest_una_partita(df, comp_df, riga, recency_decay=None):
+def _backtest_una_partita(df, comp_df, riga, recency_decay=None, home_adv=None):
     """Ricostruisce la probabilità pre-partita per UNA partita conclusa, usando solo i
     dati precedenti (walk-forward). Ritorna (prob, (nh,na), tre_pick) o None.
     tre_pick = {'motore':merc, 'statistico':merc, 'fusione':merc}."""
@@ -2709,7 +2709,8 @@ def _backtest_una_partita(df, comp_df, riga, recency_decay=None):
         return None
     hcap_h = _handicap_livello(ph, t_liv)
     hcap_a = _handicap_livello(pa, t_liv)
-    ev = evidenze.costruisci_evidenze(ph, pa, odds=None, hcap_home=hcap_h, hcap_away=hcap_a)
+    ev = evidenze.costruisci_evidenze(ph, pa, odds=None, hcap_home=hcap_h, hcap_away=hcap_a,
+                                      home_adv=home_adv)
     sig = segnali.calcola_signal(ev)
     stat = statistico.analizza(ph, pa)
     racc = racconto.racconta(home, away, ev, sig, statistico=stat)
@@ -3013,6 +3014,16 @@ def pagina_backtest(user):
                                    "peso = exp(-giorni/decadimento).")
     recency_decay = recency_gg if usa_recency else None
 
+    c3 = st.columns(2)
+    usa_hadv = c3[0].checkbox("Testa vantaggio campo diverso", value=False,
+                              help="Il default è 1.06 (casa segna +6%, ospite -6%). "
+                                   "Alza per dare più peso al giocare in casa.")
+    hadv_val = c3[1].slider("Vantaggio campo", 1.00, 1.20, 1.06, step=0.02,
+                            disabled=not usa_hadv,
+                            help="1.06 = default. 1.10-1.14 = campo più forte "
+                                 "(riduce le vittorie ospite previste).")
+    home_adv = hadv_val if usa_hadv else None
+
     if not st.button("▶️ Esegui backtest", type="primary"):
         return
 
@@ -3033,7 +3044,7 @@ def pagina_backtest(user):
             prog.progress(i / max(1, len(righe)), text=f"Partita {i+1}/{len(righe)}…")
         try:
             gc, gt = int(r["gol_casa"]), int(r["gol_trasferta"])
-            res = _backtest_una_partita(df, comp_df, r, recency_decay)
+            res = _backtest_una_partita(df, comp_df, r, recency_decay, home_adv)
             if not res:
                 saltate += 1
                 continue

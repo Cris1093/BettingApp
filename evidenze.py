@@ -451,7 +451,7 @@ def convergenza_recente(home, away):
 
 
 def costruisci_evidenze(partite_home, partite_away, odds=None, variazioni=None,
-                        hcap_home=1.0, hcap_away=1.0, w_freq=None, w_pois=None):
+                        hcap_home=1.0, hcap_away=1.0, w_freq=None, w_pois=None, home_adv=None):
     """Punto d'ingresso: costruisce l'intero quadro di evidenze per la partita.
     Separazione netta: 'prob' = modello (FUSO frequenze+Poisson), 'quote' = mercato
     (raw+novig), 'value' = convenienza economica (edge/EV). La probabilità NON è mai
@@ -473,6 +473,8 @@ def costruisci_evidenze(partite_home, partite_away, odds=None, variazioni=None,
             kw["w_freq"] = w_freq
         if w_pois is not None:
             kw["w_pois"] = w_pois
+        if home_adv is not None:
+            kw["home_adv"] = home_adv
         prob_fusa, fus_det = fusione.fondi(prob_freq, home, away, hcap_home, hcap_away, **kw)
         if prob_fusa:
             prob = prob_fusa

@@ -33,9 +33,13 @@ def _media_pesata_gol(partite, tipo):
     return (num / den) if den > 0 else None
 
 
-def lambda_attesi(home_blocco, away_blocco, hcap_home=1.0, hcap_away=1.0):
+HOME_ADV = 1.06   # fattore campo di default (moltiplica λ casa); la trasferta usa il reciproco simmetrico
+
+
+def lambda_attesi(home_blocco, away_blocco, hcap_home=1.0, hcap_away=1.0, home_adv=HOME_ADV):
     """Gol attesi λ per casa e trasferta, da medie pesate incrociate (attacco vs difesa),
-    dando più peso al rendimento casa/trasferta specifico. Con handicap di livello."""
+    dando più peso al rendimento casa/trasferta specifico. Con handicap di livello.
+    home_adv modula il vantaggio campo: la casa segna ×home_adv, la trasferta ×(2-home_adv)."""
     def att(sq, tipo, split_key):
         # combina generale e split (casa/trasf), più peso allo split
         g = sq["generale"].get(tipo)
@@ -54,18 +58,19 @@ def lambda_attesi(home_blocco, away_blocco, hcap_home=1.0, hcap_away=1.0):
     lh = (att_home + dif_away) / 2.0
     la = (att_away + dif_home) / 2.0
 
-    # vantaggio campo leggero + handicap di livello (una squadra inferiore segna meno)
-    lh = lh * 1.06 * hcap_home
-    la = la * 0.96 * hcap_away
+    # vantaggio campo (simmetrico attorno a 1) + handicap di livello
+    away_adv = 2.0 - home_adv
+    lh = lh * home_adv * hcap_home
+    la = la * away_adv * hcap_away
     # clamp di sicurezza
     lh = max(0.15, min(5.0, lh))
     la = max(0.15, min(5.0, la))
     return round(lh, 3), round(la, 3)
 
 
-def prob_poisson(home_blocco, away_blocco, hcap_home=1.0, hcap_away=1.0, rho=-0.10):
+def prob_poisson(home_blocco, away_blocco, hcap_home=1.0, hcap_away=1.0, rho=-0.10, home_adv=HOME_ADV):
     """Probabilità (in %) dai gol attesi via Poisson/Dixon-Coles. Coerenti per costruzione."""
-    lh, la = lambda_attesi(home_blocco, away_blocco, hcap_home, hcap_away)
+    lh, la = lambda_attesi(home_blocco, away_blocco, hcap_home, hcap_away, home_adv)
     pr = analisi.probabilita(lh, la, rho)   # ritorna frazioni 0..1
     out = {
         "1": pr["1"] * 100, "X": pr["X"] * 100, "2": pr["2"] * 100,
@@ -82,11 +87,11 @@ def prob_poisson(home_blocco, away_blocco, hcap_home=1.0, hcap_away=1.0, rho=-0.
 
 
 def fondi(prob_freq, home_blocco, away_blocco, hcap_home=1.0, hcap_away=1.0,
-          w_freq=W_FREQ, w_pois=W_POIS):
+          w_freq=W_FREQ, w_pois=W_POIS, home_adv=HOME_ADV):
     """Fonde le probabilità a frequenze con quelle Poisson in un'unica stima per mercato.
     Ritorna (prob_fusa, dettaglio) dove dettaglio contiene freq, poisson, λ e risultati.
     Le coppie complementari restano coerenti (rinormalizzate)."""
-    p_pois, meta = prob_poisson(home_blocco, away_blocco, hcap_home, hcap_away)
+    p_pois, meta = prob_poisson(home_blocco, away_blocco, hcap_home, hcap_away, home_adv=home_adv)
     tot_w = (w_freq + w_pois) or 1.0
 
     def mix(m):
