@@ -4516,6 +4516,7 @@ def pagina_storico_pronostici(user):
             for eng in ("motore", "fusione", "solostat", "ev", "cristiano"):
                 cell[eng] = ""
         righe.append({
+            "_pid": _txt(r.get("partita_id")),   # id nascosto per il salvataggio (regge il filtro)
             "Data": r.get("data"), "Casa": r.get("squadra_casa"),
             "Trasferta": r.get("squadra_trasferta"), "Risultato": ris,
             "Competizione": _label_da_comp(comp_per_id.get(_txt(r.get("partita_id"))),
@@ -4607,6 +4608,7 @@ def pagina_storico_pronostici(user):
     edit = st.data_editor(
         tab, use_container_width=True, hide_index=True, key="editor_storico",
         column_config={
+            "_pid": None,
             "Risultato": st.column_config.TextColumn("Risultato", help="Es. 1-1, 2-0"),
             "Competizione": st.column_config.SelectboxColumn(
                 "Competizione", options=comp_opts,
@@ -4635,14 +4637,20 @@ def pagina_storico_pronostici(user):
     if st.button("💾 Salva risultati e competizioni", type="primary"):
         import re as _re
         recs = []
-        for i, r in pron.reset_index(drop=True).iterrows():
-            pid = _txt(r.get("partita_id"))
+        # mappa id -> riga pronostico (per recuperare i valori vecchi), regge il filtro
+        pron_by_id = {_txt(rr.get("partita_id")): rr for _, rr in pron.iterrows()}
+        for i in range(len(edit)):
+            erow = edit.iloc[i]
+            pid = _txt(erow.get("_pid"))
             if not pid:
+                continue
+            r = pron_by_id.get(pid)
+            if r is None:
                 continue
             rec = {"id": pid}
             cambia = False
             # risultato
-            ris_txt = _txt(edit.iloc[i]["Risultato"])
+            ris_txt = _txt(erow["Risultato"])
             mm = _re.match(r"^\s*(\d+)\s*[-:]\s*(\d+)\s*$", ris_txt)
             if mm:
                 gc_new, gt_new = int(mm.group(1)), int(mm.group(2))
@@ -4652,8 +4660,8 @@ def pagina_storico_pronostici(user):
                     rec["gol_casa"] = gc_new
                     rec["gol_trasferta"] = gt_new
                     cambia = True
-            # competizione: risolvi al codice tramite la mappa etichetta->codice
-            comp_lab = _txt(edit.iloc[i].get("Competizione"))
+            # competizione
+            comp_lab = _txt(erow.get("Competizione"))
             comp_old_lab = _label_da_comp(comp_per_id.get(pid), comp_df_st) or ""
             if comp_lab and comp_lab != comp_old_lab:
                 nuovo = comp_code_by_label.get(comp_lab)
@@ -4662,9 +4670,9 @@ def pagina_storico_pronostici(user):
                     cambia = True
             if cambia:
                 recs.append(rec)
-            # pronostico Cristiano: salva se modificato (aggiornamento diretto sui pronostici)
+            # pronostico Cristiano
             if "✍️ Cristiano" in edit.columns:
-                cri_new = _txt(edit.iloc[i].get("✍️ Cristiano"))
+                cri_new = _txt(erow.get("✍️ Cristiano"))
                 cri_new = "" if cri_new == "—" else cri_new
                 cri_old = _txt(r.get("pron_cristiano")) if "pron_cristiano" in pron.columns else ""
                 if cri_new != cri_old:
