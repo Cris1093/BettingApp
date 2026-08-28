@@ -146,6 +146,51 @@ def _incroci_gol(home_name, away_name, ev):
     return {"titolo": "⚔️ Incroci gol (attacco vs difesa)", "righe": righe}
 
 
+def _tassi_ou(home_name, away_name, ev):
+    """Confronto Over/Under TOTALI tra le due squadre (quante loro partite sono finite
+    over/under quella soglia), su finestre tutte/10/5. Due blocchi:
+    - GENERALE: tutte le partite di ciascuna squadra;
+    - CASA/TRASF: la casa solo in casa, l'ospite solo in trasferta.
+    Linee: Over 1.5, Over/Under 2.5, Over/Under 3.5."""
+    ph = ev.get("partite_home") or []
+    pa = ev.get("partite_away") or []
+    if not ph or not pa:
+        return None
+
+    ph_venue = [p for p in ph if p["casa"] is True]     # casa in casa
+    pa_venue = [p for p in pa if p["casa"] is False]    # ospite in trasferta
+
+    def tot_over(partite, soglia, n):
+        sel = partite[:n] if n else partite
+        tot = len(sel)
+        k = sum(1 for p in sel if (p["gf"] + p["gs"]) > soglia)
+        return k, tot
+
+    # (etichetta mercato, soglia, is_over)
+    linee = [("Over 1.5", 1.5, True),
+             ("Over 2.5", 2.5, True), ("Under 2.5", 2.5, False),
+             ("Over 3.5", 3.5, True), ("Under 3.5", 3.5, False)]
+    finestre = [("tutte", None), ("ultime 10", 10), ("ultime 5", 5)]
+
+    def riga(merc, soglia, is_over, etich, n, lh, la, nome_extra=""):
+        hk, ht = tot_over(lh, soglia, n)
+        ak, at = tot_over(la, soglia, n)
+        if not is_over:  # Under = totale - over
+            hk, ak = ht - hk, at - ak
+        return (f"{merc} ({etich}{nome_extra}) — {home_name}: {hk}/{ht} · "
+                f"{away_name}: {ak}/{at}")
+
+    righe = ["— Confronto sul TOTALE partite —"]
+    for merc, soglia, is_over in linee:
+        for etich, n in finestre:
+            righe.append(riga(merc, soglia, is_over, etich, n, ph, pa))
+    righe.append("— Solo casa (per la casa) e trasferta (per l'ospite) —")
+    for merc, soglia, is_over in linee:
+        for etich, n in finestre:
+            righe.append(riga(merc, soglia, is_over, etich, n, ph_venue, pa_venue, " casa/trasf"))
+    return {"titolo": "📊 Over/Under a confronto (casa vs trasferta)", "righe": righe}
+
+
 def _casa_trasferta(home_name, away_name, ev):
     h, a = ev["home"]["split"], ev["away"]["split"]
     righe = []
@@ -930,6 +975,9 @@ def racconta(home_name, away_name, ev, signal, competizione=None, statistico=Non
     incr = _incroci_gol(home_name, away_name, ev)
     if incr:
         sezioni.append(incr)
+    tou = _tassi_ou(home_name, away_name, ev)
+    if tou:
+        sezioni.append(tou)
     sezioni.extend([
         _casa_trasferta(home_name, away_name, ev),
         _convergenze(ev),
