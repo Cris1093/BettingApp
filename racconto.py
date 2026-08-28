@@ -1099,9 +1099,12 @@ def racconta(home_name, away_name, ev, signal, competizione=None, statistico=Non
     # VETO anche sul pronostico principale (Motore): se il suo mercato è bloccato dalla
     # contro-tendenza, ripiega sul miglior mercato del signal che passa (conf>=32).
     pron_out = pron
+    primo_merc = pron.get("mercato") if pron else None   # primo pronostico (pre-veto)
+    primo_bloccato = False
     if pron and pron.get("mercato") and ph is not None:
         vietato, motivo = _veto_contro_tendenza(pron["mercato"], ph, pa)
         if vietato:
+            primo_bloccato = True
             # lista ordinata dei mercati del signal per probabilità (escluso "12")
             scored = sorted(((m["mercato"], m.get("stat")) for m in signal
                              if m.get("stat") is not None and m.get("mercato") != "12"),
@@ -1136,4 +1139,5 @@ def racconta(home_name, away_name, ev, signal, competizione=None, statistico=Non
             "pronostici_fusi": fusi,
             "fusione_media": {"mercato": fus_media_merc, "confidence": fus_media_conf},
             "solo_statistico": {"mercato": stat_merc, "confidence": stat_conf},
-            "miglior_ev": miglior_ev}
+            "miglior_ev": miglior_ev,
+            "primo_pronostico": primo_merc, "primo_bloccato": primo_bloccato}

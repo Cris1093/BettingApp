@@ -2906,6 +2906,66 @@ def _confronto_book(df, comp_df, concluse, recency_decay=None, home_adv=None):
     }
 
 
+# ============================================================================
+# FUNZIONE TEMPORANEA (usa-e-getta): confronto strategia RIPIEGO vs TUTTO-O-NIENTE
+# Per rimuoverla: cancella questa funzione e il blocco "🧪 Confronto strategie" nella
+# pagina backtest. Non è usata da nient'altro.
+# ============================================================================
+def _confronto_strategie_veto(df, comp_df, concluse, recency_decay=None, home_adv=None):
+    """Confronta due strategie del Motore sulle partite target concluse:
+    A) RIPIEGO: se il primo pronostico è bloccato dal veto, gioca il secondo (comportamento
+       attuale);
+    B) TUTTO-O-NIENTE: se il primo è bloccato, NON gioca.
+    Ritorna un dict con hit-rate e n. giocate per ciascuna."""
+    a_ok = a_tot = 0        # ripiego: gioca sempre (primo o ripiego)
+    b_ok = b_tot = 0        # tutto-o-niente: gioca solo se il primo non è bloccato
+    b_saltate = 0
+    for _, r in concluse.iterrows():
+        gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
+        if not (_num_ok(gc) and _num_ok(gt)):
+            continue
+        home, away = r["squadra_casa"], r["squadra_trasferta"]
+        data_p, pid = r["data"], r.get("id")
+        t_liv = _livello_di(r.get("competizione"), comp_df)
+        t_cat = categoria_di(r.get("competizione"), comp_df)
+        t_key = _key(r.get("competizione")) if r.get("competizione") else None
+        ph = _partite_squadra_evidenze(df, home, data_p, pid, comp_df, t_liv, t_cat, t_key, recency_decay)
+        pa = _partite_squadra_evidenze(df, away, data_p, pid, comp_df, t_liv, t_cat, t_key, recency_decay)
+        if not ph or not pa:
+            continue
+        hcap_h = _handicap_livello(ph, t_liv)
+        hcap_a = _handicap_livello(pa, t_liv)
+        ev = evidenze.costruisci_evidenze(ph, pa, odds=None, hcap_home=hcap_h,
+                                          hcap_away=hcap_a, home_adv=home_adv)
+        sig = segnali.calcola_signal(ev)
+        stat = statistico.analizza(ph, pa)
+        racc = racconto.racconta(home, away, ev, sig, statistico=stat)
+        merc_finale = (racc.get("pronostico") or {}).get("mercato")   # dopo veto (ripiego)
+        bloccato = racc.get("primo_bloccato", False)
+        # Strategia A (ripiego): valuta il mercato finale
+        if merc_finale:
+            a_tot += 1
+            if _pronostico_vinto(_norm_merc_bt(merc_finale), gc, gt):
+                a_ok += 1
+        # Strategia B (tutto-o-niente): gioca solo se il primo NON era bloccato
+        if not bloccato and merc_finale:
+            b_tot += 1
+            if _pronostico_vinto(_norm_merc_bt(merc_finale), gc, gt):
+                b_ok += 1
+        elif bloccato:
+            b_saltate += 1
+    return {
+        "a_ok": a_ok, "a_tot": a_tot, "a_pct": (a_ok / a_tot * 100) if a_tot else 0,
+        "b_ok": b_ok, "b_tot": b_tot, "b_pct": (b_ok / b_tot * 100) if b_tot else 0,
+        "b_saltate": b_saltate,
+    }
+
+
+def _norm_merc_bt(m):
+    """Normalizzazione minima per la valutazione esiti (riuso della logica standard)."""
+    return (m or "").strip()
+
+
 def _report_backtest_testo(valutate, saltate, min_storico, tab, tab_tre, cal_sel, merc_sel, tab_roi, cal_tutti=None):
     """Costruisce un riepilogo TESTUALE del backtest (per copia-incolla rapido)."""
     L = []
@@ -3177,39 +3237,6 @@ def pagina_backtest(user):
                       if (hit[eng][0] + hit[eng][1]) else None}
                 for eng in ("motore", "statistico", "fusione")}
 
-    # ---- CONFRONTO COL BOOKMAKER (1X2) ----
-    st.subheader("🆚 Motore vs Bookmaker (1X2)")
-    cb = _confronto_book(df, comp_df, concluse, recency_decay, home_adv)
-    if not cb:
-        st.caption("Nessuna partita con tutte e tre le quote 1, X, 2 salvate: "
-                   "il confronto col bookmaker non è disponibile.")
-    else:
-        st.caption(f"Confronto su {cb['n']} partite dove sono salvate tutte le quote 1/X/2. "
-                   "Il 'favorito' del book è l'esito con la quota più bassa.")
-        cc = st.columns(2)
-        cc[0].metric("🎯 Motore azzecca 1X2", f"{cb['acc_mot']:.0f}%",
-                     help=f"{cb['mot_ok']}/{cb['n']} esiti 1X2 corretti.")
-        cc[1].metric("🏦 Favorito book azzecca", f"{cb['acc_book']:.0f}%",
-                     help=f"{cb['book_ok']}/{cb['n']} esiti 1X2 corretti.")
-        if cb["diss_tot"] > 0:
-            st.markdown(f"**Quando il motore dissente dal book** ({cb['diss_tot']} partite "
-                        "dove il motore indica un esito diverso dal favorito del book):")
-            dd = st.columns(2)
-            dd[0].metric("Motore ha ragione", f"{cb['diss_mot_ok']}/{cb['diss_tot']}",
-                         help="Nei dissensi, quante volte l'esito del motore è quello reale.")
-            dd[1].metric("Book ha ragione", f"{cb['diss_book_ok']}/{cb['diss_tot']}")
-            if cb["diss_mot_ok"] > cb["diss_book_ok"]:
-                st.success("Nei casi di dissenso, il motore batte il book: è lì che può "
-                           "nascere il valore (il book sta sbagliando il favorito).")
-            elif cb["diss_mot_ok"] < cb["diss_book_ok"]:
-                st.info("Nei casi di dissenso vince più spesso il book. Normale: battere "
-                        "l'accuratezza del book è difficilissimo. Il valore si cerca sul "
-                        "PREZZO (ROI/EV), non sull'azzeccare più esiti.")
-            else:
-                st.info("Nei dissensi motore e book pari. Campione piccolo: leggi con cautela.")
-        st.caption("⚠️ Atteso: il book è quasi imbattibile sull'ACCURATEZZA pura. Il vero "
-                   "vantaggio si misura sul ROI (valore sul prezzo), non su chi azzecca di più.")
-
     # ---- METRICHE QUALITÀ MODELLO (protagoniste) ----
     st.subheader("Qualità delle probabilità (indipendente dalle quote)")
     st.caption("Brier e Log Loss: più bassi è meglio. 'Batte baseline' = il modello è "
@@ -3301,6 +3328,42 @@ def pagina_backtest(user):
                           mime="text/plain")
     st.caption("Oppure copia direttamente da qui (clic sull'icona in alto a destra del riquadro):")
     st.code(testo, language="text")
+
+    # ---- 🧪 CONFRONTO STRATEGIE (temporaneo, usa-e-getta) ----
+    st.divider()
+    st.subheader("🧪 Confronto strategie: ripiego vs tutto-o-niente")
+    st.caption("Confronta due modi di gestire il veto del Motore: A) se il primo pronostico "
+               "è bloccato gioca il secondo (attuale); B) se il primo è bloccato non gioca. "
+               "Calcolo separato (un po' lento): premi il pulsante quando ti serve.")
+    if st.button("▶️ Calcola confronto strategie"):
+        _pr2 = st.progress(0.0, text="Confronto in corso…")
+        cs = _confronto_strategie_veto(df, comp_df, concluse, recency_decay, home_adv)
+        _pr2.progress(1.0, text="Fatto.")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**A) Ripiego (attuale)**")
+            st.metric("Riuscita", f"{cs['a_pct']:.1f}%")
+            st.caption(f"{cs['a_ok']}/{cs['a_tot']} giocate")
+        with c2:
+            st.markdown("**B) Tutto-o-niente**")
+            st.metric("Riuscita", f"{cs['b_pct']:.1f}%")
+            st.caption(f"{cs['b_ok']}/{cs['b_tot']} giocate · {cs['b_saltate']} saltate")
+        # lettura
+        if cs["b_tot"] > 0 and cs["a_tot"] > 0:
+            diff = cs["b_pct"] - cs["a_pct"]
+            if diff > 3:
+                st.success(f"«Tutto-o-niente» ha un hit-rate più alto di {diff:.1f} punti, ma "
+                           f"gioca {cs['a_tot']-cs['b_tot']} partite in meno. Se preferisci "
+                           "qualità a quantità, conviene NON giocare il ripiego.")
+            elif diff < -3:
+                st.info(f"«Ripiego» è migliore di {-diff:.1f} punti: giocare il secondo "
+                        "pronostico conviene, non peggiora l'hit-rate.")
+            else:
+                st.info("Le due strategie sono simili come hit-rate. Il ripiego fa giocare più "
+                        "partite senza peggiorare: tienilo. Differenze piccole = poco significative "
+                        "su questo campione.")
+        st.caption("Nota: valuta solo il MERCATO del Motore (pronostico di punta). È un test "
+                   "temporaneo, rimovibile quando non serve più.")
 
 
 def _quota_storica(riga, mercato):
