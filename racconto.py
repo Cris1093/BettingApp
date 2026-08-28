@@ -1102,9 +1102,9 @@ def racconta(home_name, away_name, ev, signal, competizione=None, statistico=Non
     if pron and pron.get("mercato") and ph is not None:
         vietato, motivo = _veto_contro_tendenza(pron["mercato"], ph, pa)
         if vietato:
-            # lista ordinata dei mercati del signal per probabilità
+            # lista ordinata dei mercati del signal per probabilità (escluso "12")
             scored = sorted(((m["mercato"], m.get("stat")) for m in signal
-                             if m.get("stat") is not None),
+                             if m.get("stat") is not None and m.get("mercato") != "12"),
                             key=lambda t: t[1], reverse=True)
             nuovo, nconf, _ = _seleziona_con_veto(scored, ph, pa)
             if nuovo:

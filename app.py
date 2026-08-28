@@ -4441,12 +4441,15 @@ def pagina_storico_pronostici(user):
         return base
 
     righe = []
-    conteggi = {"motore": [0, 0], "fusione": [0, 0], "solostat": [0, 0], "cristiano": [0, 0]}
+    conteggi = {"motore": [0, 0], "fusione": [0, 0], "solostat": [0, 0],
+                "ev": [0, 0], "cristiano": [0, 0]}
     aperti = 0
     for _, r in pron.iterrows():
         gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
         tre = _tre_motori_di(r)
         pron_cri = _txt(r.get("pron_cristiano")) if "pron_cristiano" in pron.columns else ""
+        merc_ev = _txt(r.get("merc_ev")) if "merc_ev" in pron.columns else ""
+        val_ev = r.get("val_ev") if "val_ev" in pron.columns else None
         cell = {}
         if gc is not None and gt is not None and not (pd.isna(gc) or pd.isna(gt)):
             ris = f"{int(gc)}-{int(gt)}"
@@ -4459,6 +4462,14 @@ def pagina_storico_pronostici(user):
                     cell[eng] = "❌"; conteggi[eng][1] += 1
                 else:
                     cell[eng] = "—"
+            # pronostico EV (mercato singolo col massimo valore atteso)
+            we = _pronostico_vinto(_norm_merc(merc_ev), gc, gt) if merc_ev else None
+            if we is True:
+                cell["ev"] = "✅"; conteggi["ev"][0] += 1
+            elif we is False:
+                cell["ev"] = "❌"; conteggi["ev"][1] += 1
+            else:
+                cell["ev"] = "—" if merc_ev else ""
             # pronostico Cristiano (combo)
             wc = _combo_vinta(pron_cri, gc, gt) if pron_cri else None
             if wc is True:
@@ -4469,7 +4480,7 @@ def pagina_storico_pronostici(user):
                 cell["cristiano"] = "—" if pron_cri else ""
         else:
             ris = "in attesa"; aperti += 1
-            for eng in ("motore", "fusione", "solostat", "cristiano"):
+            for eng in ("motore", "fusione", "solostat", "ev", "cristiano"):
                 cell[eng] = ""
         righe.append({
             "Data": r.get("data"), "Casa": r.get("squadra_casa"),
@@ -4482,18 +4493,17 @@ def pagina_storico_pronostici(user):
             "✓F": cell["fusione"],
             "📊 Statistico": tre["solostat"][0] or "—", "Conf. S": tre["solostat"][1],
             "✓S": cell["solostat"],
-            "💰 EV": (lambda mv, vv: f"{mv} ({'+' if (vv or 0) >= 0 else ''}{vv}%)"
-                      if mv and vv is not None else (mv or "—"))(
-                          _txt(r.get("merc_ev")) if "merc_ev" in pron.columns else "",
-                          r.get("val_ev") if "val_ev" in pron.columns else None),
+            "💰 EV": (f"{merc_ev} ({'+' if (val_ev or 0) >= 0 else ''}{val_ev}%)"
+                      if merc_ev and val_ev is not None else (merc_ev or "—")),
+            "✓EV": cell["ev"],
             "✍️ Cristiano": pron_cri or "—", "✓C": cell["cristiano"],
         })
 
     st.markdown("**Riuscita dei pronostici**")
-    cols = st.columns(4)
+    cols = st.columns(5)
     nomi = {"motore": "🎯 Motore", "fusione": "🔀 Fusione", "solostat": "📊 Statistico",
-            "cristiano": "✍️ Cristiano"}
-    for i, eng in enumerate(("motore", "fusione", "solostat", "cristiano")):
+            "ev": "💰 EV", "cristiano": "✍️ Cristiano"}
+    for i, eng in enumerate(("motore", "fusione", "solostat", "ev", "cristiano")):
         v, p = conteggi[eng]
         tot = v + p
         with cols[i]:
@@ -4581,6 +4591,7 @@ def pagina_storico_pronostici(user):
             "✓S": st.column_config.Column(disabled=True),
             "💰 EV": st.column_config.Column("💰 EV", disabled=True,
                 help="Mercato col valore atteso (EV) più alto e la sua percentuale."),
+            "✓EV": st.column_config.Column(disabled=True),
             "✍️ Cristiano": st.column_config.TextColumn(
                 "✍️ Cristiano", help="Il tuo pronostico (combo con '+'). Modificabile qui."),
             "✓C": st.column_config.Column(disabled=True),
