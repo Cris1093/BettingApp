@@ -3163,8 +3163,24 @@ def pagina_backtest(user):
                                  "(riduce le vittorie ospite previste).")
     home_adv = hadv_val if usa_hadv else None
 
-    if not st.button("▶️ Esegui backtest", type="primary"):
+    # Persistenza: una volta premuto "Esegui", il backtest resta "attivo" anche quando premi
+    # altri pulsanti (es. confronto strategie), senza doverlo rieseguire da capo.
+    if st.button("▶️ Esegui backtest", type="primary"):
+        st.session_state["_bt_eseguito"] = True
+        st.session_state["_bt_params"] = {"min_storico": min_storico, "max_part": max_part,
+                                          "recency_decay": recency_decay, "home_adv": home_adv}
+    if not st.session_state.get("_bt_eseguito"):
         return
+    # usa i parametri con cui è stato lanciato (coerenza tra riesecuzioni)
+    _bp = st.session_state.get("_bt_params", {})
+    min_storico = _bp.get("min_storico", min_storico)
+    max_part = _bp.get("max_part", max_part)
+    recency_decay = _bp.get("recency_decay", recency_decay)
+    home_adv = _bp.get("home_adv", home_adv)
+    if st.button("✖️ Chiudi risultati backtest"):
+        st.session_state["_bt_eseguito"] = False
+        st.session_state.pop("_bt_strategie", None)
+        st.rerun()
 
     # ordina dalla più recente e limita
     if "data" in concluse.columns:
@@ -3337,8 +3353,11 @@ def pagina_backtest(user):
                "Calcolo separato (un po' lento): premi il pulsante quando ti serve.")
     if st.button("▶️ Calcola confronto strategie"):
         _pr2 = st.progress(0.0, text="Confronto in corso…")
-        cs = _confronto_strategie_veto(df, comp_df, concluse, recency_decay, home_adv)
+        st.session_state["_bt_strategie"] = _confronto_strategie_veto(
+            df, comp_df, concluse, recency_decay, home_adv)
         _pr2.progress(1.0, text="Fatto.")
+    cs = st.session_state.get("_bt_strategie")
+    if cs:
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**A) Ripiego (attuale)**")
