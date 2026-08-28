@@ -584,7 +584,7 @@ def upsert_pronostico(record):
     _opzionali = ("scheda_json", "riepilogo", "mercato_ragionato", "score_ragionato",
                   "merc_motore", "conf_motore", "merc_statistico", "conf_statistico",
                   "merc_fusione", "conf_fusione", "merc_solo_stat", "conf_solo_stat",
-                  "merc_ev", "val_ev", "pron_cristiano")
+                  "merc_ev", "val_ev", "quota_ev", "pron_cristiano")
     try:
         _do(record)
     except Exception:
@@ -594,7 +594,7 @@ def upsert_pronostico(record):
                              "merc_motore", "conf_motore", "merc_statistico",
                              "conf_statistico", "merc_fusione", "conf_fusione",
                              "merc_solo_stat", "conf_solo_stat", "merc_ev", "val_ev",
-                             "pron_cristiano")}
+                             "quota_ev", "pron_cristiano")}
         try:
             _do(rec2)
         except Exception:
@@ -4009,6 +4009,7 @@ def pagina_analisi(user):
                     "merc_solo_stat": m_sstat, "conf_solo_stat": c_sstat,
                     "merc_ev": (racc.get("miglior_ev") or {}).get("mercato") if racc else None,
                     "val_ev": (racc.get("miglior_ev") or {}).get("ev") if racc else None,
+                    "quota_ev": (racc.get("miglior_ev") or {}).get("quota") if racc else None,
                     "pron_cristiano": pron_cristiano.strip() if pron_cristiano else None,
                 })
                 salvati.add(sig)
@@ -4198,6 +4199,7 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False, lim
                 "conf_solo_stat": ss.get("confidence"),
                 "merc_ev": (racc.get("miglior_ev") or {}).get("mercato"),
                 "val_ev": (racc.get("miglior_ev") or {}).get("ev"),
+                "quota_ev": (racc.get("miglior_ev") or {}).get("quota"),
             }
             cli.table("pronostici").update(upd).eq("id", r["id"]).execute()
             n += 1
@@ -4479,6 +4481,7 @@ def pagina_storico_pronostici(user):
         pron_cri = _txt(r.get("pron_cristiano")) if "pron_cristiano" in pron.columns else ""
         merc_ev = _txt(r.get("merc_ev")) if "merc_ev" in pron.columns else ""
         val_ev = r.get("val_ev") if "val_ev" in pron.columns else None
+        quota_ev = r.get("quota_ev") if "quota_ev" in pron.columns else None
         cell = {}
         if gc is not None and gt is not None and not (pd.isna(gc) or pd.isna(gt)):
             ris = f"{int(gc)}-{int(gt)}"
@@ -4492,13 +4495,14 @@ def pagina_storico_pronostici(user):
                 else:
                     cell[eng] = "—"
             # pronostico EV (mercato singolo col massimo valore atteso)
-            we = _pronostico_vinto(_norm_merc(merc_ev), gc, gt) if merc_ev else None
+            _mev = (merc_ev or "").strip()
+            we = _pronostico_vinto(_norm_merc(_mev), gc, gt) if _mev else None
             if we is True:
                 cell["ev"] = "✅"; conteggi["ev"][0] += 1
             elif we is False:
                 cell["ev"] = "❌"; conteggi["ev"][1] += 1
             else:
-                cell["ev"] = "—" if merc_ev else ""
+                cell["ev"] = "—" if _mev else ""
             # pronostico Cristiano (combo)
             wc = _combo_vinta(pron_cri, gc, gt) if pron_cri else None
             if wc is True:
@@ -4522,8 +4526,10 @@ def pagina_storico_pronostici(user):
             "✓F": cell["fusione"],
             "📊 Statistico": tre["solostat"][0] or "—", "Conf. S": tre["solostat"][1],
             "✓S": cell["solostat"],
-            "💰 EV": (f"{merc_ev} ({'+' if (val_ev or 0) >= 0 else ''}{val_ev}%)"
-                      if merc_ev and val_ev is not None else (merc_ev or "—")),
+            "💰 EV": (f"{merc_ev} @{quota_ev} ({'+' if (val_ev or 0) >= 0 else ''}{val_ev}%)"
+                      if merc_ev and val_ev is not None and quota_ev
+                      else (f"{merc_ev} ({'+' if (val_ev or 0) >= 0 else ''}{val_ev}%)"
+                            if merc_ev and val_ev is not None else (merc_ev or "—"))),
             "✓EV": cell["ev"],
             "✍️ Cristiano": pron_cri or "—", "✓C": cell["cristiano"],
         })

@@ -1117,7 +1117,7 @@ def racconta(home_name, away_name, ev, signal, competizione=None, statistico=Non
                 pron_out["veto_ripiego"] = f"nessun pronostico giocabile ({motivo})"
 
     # miglior pronostico per EV (solo dove ci sono quote): mercato con EV massimo positivo
-    miglior_ev = {"mercato": None, "ev": None}
+    miglior_ev = {"mercato": None, "ev": None, "quota": None}
     val = ev.get("value") or {}
     _best = None
     for merc, d in val.items():
@@ -1125,9 +1125,9 @@ def racconta(home_name, away_name, ev, signal, competizione=None, statistico=Non
         if e is None:
             continue
         if _best is None or e > _best[1]:
-            _best = (merc, e)
+            _best = (merc, e, d.get("quota"))
     if _best:
-        miglior_ev = {"mercato": _best[0], "ev": round(_best[1] * 100, 1)}
+        miglior_ev = {"mercato": _best[0], "ev": round(_best[1] * 100, 1), "quota": _best[2]}
 
     return {"home": home_name, "away": away_name, "sezioni": sezioni,
             "pronostico": pron_out, "signal": signal,
