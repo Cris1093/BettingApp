@@ -4377,6 +4377,17 @@ def pagina_storico_pronostici(user):
                     tab = tab[mask].reset_index(drop=True)
                     st.caption(f"Mostro {len(tab)} pronostici dal {d_da:%d/%m/%Y} al {d_a:%d/%m/%Y}.")
 
+    # --- filtro per nome squadra (testo) ---
+    if not tab.empty and {"Casa", "Trasferta"}.issubset(tab.columns):
+        cerca = st.text_input("🔎 Filtra per squadra", key="storico_cerca_squadra",
+                              placeholder="Scrivi parte del nome (casa o trasferta)…")
+        if cerca and cerca.strip():
+            q = cerca.strip().lower()
+            m = (tab["Casa"].astype(str).str.lower().str.contains(q, na=False) |
+                 tab["Trasferta"].astype(str).str.lower().str.contains(q, na=False))
+            tab = tab[m].reset_index(drop=True)
+            st.caption(f"Mostro {len(tab)} pronostici che contengono «{cerca.strip()}».")
+
     st.markdown("**Inserisci risultati e competizioni** direttamente qui (formato risultato: "
                 "`1-1`, `2-0`…). Poi premi Salva. Le colonne dei pronostici non sono modificabili.")
     edit = st.data_editor(
