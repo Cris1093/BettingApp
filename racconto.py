@@ -815,6 +815,8 @@ def selezione_valore(signal):
     cand = []
     scartati_fragili = []
     for m in signal:
+        if m.get("mercato") == "12":     # "12" (nessun pareggio): mai come giocata
+            continue
         ev = m.get("EV")
         if ev is None or not m.get("quota"):
             continue

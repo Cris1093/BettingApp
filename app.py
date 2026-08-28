@@ -4160,12 +4160,15 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False):
             continue
         try:
             comp = None
+            odds = None
             if not df_tutte.empty and "id" in df_tutte.columns:
                 mrow = df_tutte[df_tutte["id"].astype(str) == pid]
                 if not mrow.empty:
                     comp = _label_da_comp(mrow.iloc[0].get("competizione"), comp_df)
+                    odds = _eff_odds(mrow.iloc[0])   # quote salvate -> abilita l'EV
             racc = analisi_ragionata(df_tutte, r.get("squadra_casa"), r.get("squadra_trasferta"),
-                                     data_partita=r.get("data"), escludi_id=pid, competizione=comp)
+                                     data_partita=r.get("data"), escludi_id=pid,
+                                     competizione=comp, odds=odds)
             if not racc:
                 continue
             pm = racc.get("pronostico") or {}
