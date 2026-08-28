@@ -583,7 +583,8 @@ def upsert_pronostico(record):
 
     _opzionali = ("scheda_json", "riepilogo", "mercato_ragionato", "score_ragionato",
                   "merc_motore", "conf_motore", "merc_statistico", "conf_statistico",
-                  "merc_fusione", "conf_fusione", "merc_solo_stat", "conf_solo_stat")
+                  "merc_fusione", "conf_fusione", "merc_solo_stat", "conf_solo_stat",
+                  "pron_cristiano")
     try:
         _do(record)
     except Exception:
@@ -592,7 +593,7 @@ def upsert_pronostico(record):
                 if k not in ("scheda_json", "mercato_ragionato", "score_ragionato",
                              "merc_motore", "conf_motore", "merc_statistico",
                              "conf_statistico", "merc_fusione", "conf_fusione",
-                             "merc_solo_stat", "conf_solo_stat")}
+                             "merc_solo_stat", "conf_solo_stat", "pron_cristiano")}
         try:
             _do(rec2)
         except Exception:
@@ -707,6 +708,42 @@ def _pronostico_vinto(mercato, gc, gt):
     if m.startswith("2"):
         return gc < gt
     return None
+
+
+def _pezzo_vinto(pezzo, gc, gt):
+    """Valuta un singolo mercato, inclusi gli over/under di SQUADRA
+    ('Over 0.5 casa' = casa segna >=1; 'Over 1.5 trasferta' = ospite segna >=2)."""
+    if gc is None or gt is None:
+        return None
+    gc, gt = int(gc), int(gt)
+    m = pezzo.strip().lower()
+    # over/under di squadra (casa / trasferta)
+    import re as _re
+    mm = _re.match(r"(over|under)\s+([0-9]+(?:\.[0-9]+)?)\s+(casa|trasferta|ospite|away|home)", m)
+    if mm:
+        verso, soglia, chi = mm.group(1), float(mm.group(2)), mm.group(3)
+        gol = gc if chi in ("casa", "home") else gt
+        return gol > soglia if verso == "over" else gol < soglia
+    # altrimenti mercato standard: riuso _pronostico_vinto (con la capitalizzazione originale)
+    return _pronostico_vinto(pezzo.strip(), gc, gt)
+
+
+def _combo_vinta(testo, gc, gt):
+    """Valuta un pronostico combo (pezzi separati da '+', tutti da vincere insieme, AND).
+    Ritorna True (tutti vinti), False (almeno uno perso), o None se un pezzo è ignoto."""
+    if not testo or not testo.strip():
+        return None
+    pezzi = [p.strip() for p in testo.split("+") if p.strip()]
+    if not pezzi:
+        return None
+    tutti_veri = True
+    for p in pezzi:
+        esito = _pezzo_vinto(p, gc, gt)
+        if esito is None:
+            return None          # un pezzo non riconosciuto -> non valutabile
+        if esito is False:
+            tutti_veri = False   # basta uno perso per perdere la combo
+    return tutti_veri
 
 
 def _txt(v):
@@ -3794,6 +3831,42 @@ def pagina_analisi(user):
 
     # === ANALISI & PRONOSTICO (motore unico: frequenze + Poisson/Elo fusi) ===
     st.subheader("🎯 Analisi & Pronostico")
+    # campo per il pronostico personale (combo con '+', es. "1X + Under 2.5")
+    pron_cristiano = ""
+    if not pend.empty:
+        _pid_c = str(row.get("id"))
+        _pron_esist = ""
+        try:
+            _pr = carica_pronostici()
+            if not _pr.empty and "pron_cristiano" in _pr.columns:
+                _match = _pr[_pr["partita_id"].astype(str) == _pid_c]
+                if not _match.empty:
+                    _pron_esist = _txt(_match.iloc[0].get("pron_cristiano"))
+        except Exception:
+            pass
+        pron_cristiano = st.text_input(
+            "✍️ Pronostico Cristiano", value=_pron_esist, key=f"pron_cri_{_pid_c}",
+            placeholder="Es. 1X + Under 2.5  ·  Over 0.5 casa  ·  Goal + Over 2.5",
+            help="Il tuo pronostico. Combo con '+' (tutte da vincere). Mercati: 1/X/2, 1X/X2/12, "
+                 "Over/Under 1.5/2.5/3.5, Goal/No Goal, e Over/Under di squadra (es. 'Over 1.5 casa').")
+        if st.button("💾 Salva Pronostico Cristiano", key=f"salva_pron_cri_{_pid_c}"):
+            try:
+                cli = get_client()
+                val = pron_cristiano.strip() if pron_cristiano else None
+                # assicura che esista la riga pronostico, poi aggiorna la colonna
+                ex = cli.table("pronostici").select("id").eq("partita_id", _pid_c).execute()
+                if ex.data:
+                    cli.table("pronostici").update({"pron_cristiano": val}).eq(
+                        "partita_id", _pid_c).execute()
+                else:
+                    cli.table("pronostici").insert({
+                        "partita_id": _pid_c, "data": str(row.get("data")),
+                        "squadra_casa": home, "squadra_trasferta": away,
+                        "pron_cristiano": val}).execute()
+                st.cache_data.clear()
+                st.success("Pronostico Cristiano salvato.")
+            except Exception as e:
+                st.warning(f"Salvataggio non riuscito: {e}")
     st.caption("Motore unico: probabilità a frequenze e Poisson/Elo fuse in un'unica stima. "
                "Signal = robustezza statistica; value (EV) = convenienza vs quota, separati.")
     comp_target = (_label_da_comp(row.get("competizione"), carica_competizioni())
@@ -3859,6 +3932,7 @@ def pagina_analisi(user):
                     "merc_statistico": m_stat, "conf_statistico": c_stat,
                     "merc_fusione": m_fus, "conf_fusione": c_fus,
                     "merc_solo_stat": m_sstat, "conf_solo_stat": c_sstat,
+                    "pron_cristiano": pron_cristiano.strip() if pron_cristiano else None,
                 })
                 salvati.add(sig)
                 st.caption("💾 Pronostico salvato automaticamente in 📈 Storico pronostici.")
@@ -4285,17 +4359,17 @@ def pagina_storico_pronostici(user):
         return base
 
     righe = []
-    conteggi = {"motore": [0, 0], "fusione": [0, 0], "solostat": [0, 0]}  # [vinti, persi]
+    conteggi = {"motore": [0, 0], "fusione": [0, 0], "solostat": [0, 0], "cristiano": [0, 0]}
     aperti = 0
     for _, r in pron.iterrows():
         gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
         tre = _tre_motori_di(r)
+        pron_cri = _txt(r.get("pron_cristiano")) if "pron_cristiano" in pron.columns else ""
         cell = {}
         if gc is not None and gt is not None and not (pd.isna(gc) or pd.isna(gt)):
             ris = f"{int(gc)}-{int(gt)}"
             for eng in ("motore", "fusione", "solostat"):
                 merc, conf = tre[eng]
-                # tutti usano nomi mercato standard; valuta con _pronostico_vinto
                 won = _pronostico_vinto(_norm_merc(merc), gc, gt) if merc else None
                 if won is True:
                     cell[eng] = "✅"; conteggi[eng][0] += 1
@@ -4303,9 +4377,17 @@ def pagina_storico_pronostici(user):
                     cell[eng] = "❌"; conteggi[eng][1] += 1
                 else:
                     cell[eng] = "—"
+            # pronostico Cristiano (combo)
+            wc = _combo_vinta(pron_cri, gc, gt) if pron_cri else None
+            if wc is True:
+                cell["cristiano"] = "✅"; conteggi["cristiano"][0] += 1
+            elif wc is False:
+                cell["cristiano"] = "❌"; conteggi["cristiano"][1] += 1
+            else:
+                cell["cristiano"] = "—" if pron_cri else ""
         else:
             ris = "in attesa"; aperti += 1
-            for eng in ("motore", "fusione", "solostat"):
+            for eng in ("motore", "fusione", "solostat", "cristiano"):
                 cell[eng] = ""
         righe.append({
             "Data": r.get("data"), "Casa": r.get("squadra_casa"),
@@ -4318,13 +4400,14 @@ def pagina_storico_pronostici(user):
             "✓F": cell["fusione"],
             "📊 Statistico": tre["solostat"][0] or "—", "Conf. S": tre["solostat"][1],
             "✓S": cell["solostat"],
+            "✍️ Cristiano": pron_cri or "—", "✓C": cell["cristiano"],
         })
 
     st.markdown("**Riuscita dei pronostici**")
-    cols = st.columns(3)
-    nomi = {"motore": "🎯 Motore", "fusione": "🔀 Fusione (motore+statistico)",
-            "solostat": "📊 Statistico (solo dati)"}
-    for i, eng in enumerate(("motore", "fusione", "solostat")):
+    cols = st.columns(4)
+    nomi = {"motore": "🎯 Motore", "fusione": "🔀 Fusione", "solostat": "📊 Statistico",
+            "cristiano": "✍️ Cristiano"}
+    for i, eng in enumerate(("motore", "fusione", "solostat", "cristiano")):
         v, p = conteggi[eng]
         tot = v + p
         with cols[i]:
@@ -4334,7 +4417,7 @@ def pagina_storico_pronostici(user):
                 cc[0].metric("Giocati", tot)
                 cc[1].metric("Riuscita", f"{v/tot*100:.0f}%")
             else:
-                st.caption("Nessuno concluso (si popola d'ora in avanti).")
+                st.caption("Nessuno concluso.")
     if aperti:
         st.caption(f"{aperti} in attesa di risultato.")
 
@@ -4410,6 +4493,9 @@ def pagina_storico_pronostici(user):
             "📊 Statistico": st.column_config.Column(disabled=True),
             "Conf. S": st.column_config.Column(disabled=True),
             "✓S": st.column_config.Column(disabled=True),
+            "✍️ Cristiano": st.column_config.TextColumn(
+                "✍️ Cristiano", help="Il tuo pronostico (combo con '+'). Modificabile qui."),
+            "✓C": st.column_config.Column(disabled=True),
         })
 
     if st.button("💾 Salva risultati e competizioni", type="primary"):
@@ -4442,6 +4528,20 @@ def pagina_storico_pronostici(user):
                     cambia = True
             if cambia:
                 recs.append(rec)
+            # pronostico Cristiano: salva se modificato (aggiornamento diretto sui pronostici)
+            if "✍️ Cristiano" in edit.columns:
+                cri_new = _txt(edit.iloc[i].get("✍️ Cristiano"))
+                cri_new = "" if cri_new == "—" else cri_new
+                cri_old = _txt(r.get("pron_cristiano")) if "pron_cristiano" in pron.columns else ""
+                if cri_new != cri_old:
+                    try:
+                        cli = get_client()
+                        if cli:
+                            cli.table("pronostici").update(
+                                {"pron_cristiano": cri_new or None}).eq(
+                                "partita_id", pid).execute()
+                    except Exception:
+                        pass
         if recs:
             try:
                 aggiorna_partite(recs)
