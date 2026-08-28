@@ -897,14 +897,88 @@ def _nota_calibrazione():
             "abbassate ai valori realistici. L'1X2 è già affidabile e resta invariato.")
 
 
-def fusione_media(signal, stat):
+def _opposto_accaduto(mercato, partita):
+    """Dato un mercato e UNA partita giocata (dict gf/gs/casa), dice se in quella partita
+    è uscito l'esito OPPOSTO al mercato. None se non applicabile."""
+    gf, gs = int(partita["gf"]), int(partita["gs"])
+    tot = gf + gs
+    m = mercato.strip()
+    # gol totali
+    if m == "Over 1.5":  return tot < 2
+    if m == "Under 1.5": return tot >= 2
+    if m == "Over 2.5":  return tot < 3
+    if m == "Under 2.5": return tot >= 3
+    if m == "Over 3.5":  return tot < 4
+    if m == "Under 3.5": return tot >= 4
+    if m == "Goal":      return not (gf >= 1 and gs >= 1)
+    if m == "No Goal":   return (gf >= 1 and gs >= 1)
+    # segni: opposto = la squadra (dal suo punto di vista, gf=suoi gol) ha PERSO
+    if m in ("1", "1X"):  return gf < gs      # casa/non-perde -> opposto: ha perso
+    if m in ("2", "X2"):  return gf < gs      # ospite/non-perde -> opposto: ha perso
+    if m == "X":          return gf != gs     # opposto del pari: c'è un vincitore
+    return None
+
+
+def _veto_contro_tendenza(mercato, partite_home, partite_away):
+    """Applica i tre blocchi di veto. Ritorna (vietato: bool, motivo: str|None).
+    1) opposto nell'ULTIMA partita di una delle due squadre;
+    2) opposto >=3 volte nelle ULTIME 5 di una delle due;
+    3) per i segni: opposto nell'ultima partita nella SEDE specifica
+       (1/1X: ultima IN CASA della casa; 2/X2: ultima IN TRASFERTA dell'ospite)."""
+    ph = partite_home or []
+    pa = partite_away or []
+
+    # blocco 1: ultima partita (qualsiasi sede)
+    for part, nome in ((ph, "casa"), (pa, "ospite")):
+        if part and _opposto_accaduto(mercato, part[0]):
+            return True, f"opposto nell'ultima partita ({nome})"
+
+    # blocco 2: >=3 volte nelle ultime 5
+    for part, nome in ((ph, "casa"), (pa, "ospite")):
+        ultime5 = part[:5]
+        cnt = sum(1 for p in ultime5 if _opposto_accaduto(mercato, p))
+        if cnt >= 3:
+            return True, f"opposto {cnt}/5 volte nelle ultime 5 ({nome})"
+
+    # blocco 3: sede specifica per i segni
+    m = mercato.strip()
+    if m in ("1", "1X"):
+        in_casa = [p for p in ph if p.get("casa") is True]
+        if in_casa and _opposto_accaduto(m, in_casa[0]):
+            return True, "sconfitta nell'ultima gara in casa"
+    if m in ("2", "X2"):
+        in_trasf = [p for p in pa if p.get("casa") is False]
+        if in_trasf and _opposto_accaduto(m, in_trasf[0]):
+            return True, "sconfitta nell'ultima gara in trasferta"
+
+    return False, None
+
+
+def _seleziona_con_veto(candidati_ordinati, partite_home, partite_away, conf_min=32):
+    """Data una lista di (mercato, confidence) ordinata dal migliore, applica il veto e
+    ritorna il PRIMO che passa tutti i blocchi con confidence >= conf_min.
+    Ritorna (mercato, confidence, vietati) dove vietati è la lista dei bloccati (per nota).
+    Se nessuno passa: (None, None, vietati)."""
+    vietati = []
+    for merc, conf in candidati_ordinati:
+        if conf is None or conf < conf_min:
+            continue
+        vietato, motivo = _veto_contro_tendenza(merc, partite_home, partite_away)
+        if vietato:
+            vietati.append((merc, motivo))
+            continue
+        return merc, conf, vietati
+    return None, None, vietati
+
+
+def fusione_media(signal, stat, partite_home=None, partite_away=None):
     """Fusione a MEDIA: per i mercati candidati (doppie chance, Goal/NoGoal, Over/Under
-    1.5/2.5/3.5) calcola (prob_motore + %_statistico)/2 e sceglie il migliore.
-    Ritorna (mercato, confidence) o (None, None)."""
+    1.5/2.5/3.5) calcola (prob_motore + %_statistico)/2. Ordina e applica il VETO
+    contro-tendenza (ripiego al successivo, conf>=32). Ritorna (mercato, confidence) o
+    (None, None)."""
     if not signal or not stat:
         return None, None
     sig_by = {m["mercato"]: m.get("stat") for m in signal}   # prob del motore
-    # % statistico (variante generale) per nome mercato-motore
     stat_pct = {}
     for r in stat.get("tabella", []):
         if r["tipologia"] != "generale":
@@ -914,23 +988,23 @@ def fusione_media(signal, stat):
             stat_pct[nome_mot] = r["somma"][2]
     candidati = ["1X", "X2", "Goal", "No Goal",
                  "Over 1.5", "Under 1.5", "Over 2.5", "Under 2.5", "Over 3.5", "Under 3.5"]
-    best = None
+    scored = []
     for merc in candidati:
         pm = sig_by.get(merc)
         ps = stat_pct.get(merc)
         if pm is None or ps is None:
             continue
-        media = (pm + ps) / 2.0
-        if best is None or media > best[1]:
-            best = (merc, media)
-    if not best:
-        return None, None
-    return best[0], round(best[1])
+        scored.append((merc, round((pm + ps) / 2.0)))
+    scored.sort(key=lambda t: t[1], reverse=True)
+    if partite_home is not None:
+        merc, conf, _ = _seleziona_con_veto(scored, partite_home, partite_away)
+        return (merc, conf) if merc else (None, None)
+    return (scored[0][0], scored[0][1]) if scored else (None, None)
 
 
-def solo_statistico(stat):
+def solo_statistico(stat, partite_home=None, partite_away=None):
     """Miglior pronostico basato SOLO sui dati statistici, tra gli stessi mercati della
-    fusione a media (1X, X2, Goal/NoGoal, Over/Under 1.5/2.5/3.5). Sceglie la % più alta.
+    fusione a media. Ordina per % e applica il VETO contro-tendenza (ripiego, conf>=32).
     Ritorna (mercato, percentuale) o (None, None)."""
     if not stat:
         return None, None
@@ -943,16 +1017,12 @@ def solo_statistico(stat):
             stat_pct[nome_mot] = r["somma"][2]
     candidati = ["1X", "X2", "Goal", "No Goal",
                  "Over 1.5", "Under 1.5", "Over 2.5", "Under 2.5", "Over 3.5", "Under 3.5"]
-    best = None
-    for merc in candidati:
-        ps = stat_pct.get(merc)
-        if ps is None:
-            continue
-        if best is None or ps > best[1]:
-            best = (merc, ps)
-    if not best:
-        return None, None
-    return best[0], round(best[1])
+    scored = [(merc, round(stat_pct[merc])) for merc in candidati if stat_pct.get(merc) is not None]
+    scored.sort(key=lambda t: t[1], reverse=True)
+    if partite_home is not None:
+        merc, conf, _ = _seleziona_con_veto(scored, partite_home, partite_away)
+        return (merc, conf) if merc else (None, None)
+    return (scored[0][0], scored[0][1]) if scored else (None, None)
 
 
 def racconta(home_name, away_name, ev, signal, competizione=None, statistico=None):
@@ -1017,12 +1087,51 @@ def racconta(home_name, away_name, ev, signal, competizione=None, statistico=Non
         if tab:
             sezioni.append(tab)
     fusi = fondi_due_motori(signal, statistico) if statistico else []
-    fus_media_merc, fus_media_conf = fusione_media(signal, statistico) if statistico else (None, None)
-    stat_merc, stat_conf = solo_statistico(statistico) if statistico else (None, None)
+    ph = ev.get("partite_home")
+    pa = ev.get("partite_away")
+    fus_media_merc, fus_media_conf = (fusione_media(signal, statistico, ph, pa)
+                                      if statistico else (None, None))
+    stat_merc, stat_conf = (solo_statistico(statistico, ph, pa)
+                            if statistico else (None, None))
+
+    # VETO anche sul pronostico principale (Motore): se il suo mercato è bloccato dalla
+    # contro-tendenza, ripiega sul miglior mercato del signal che passa (conf>=32).
+    pron_out = pron
+    if pron and pron.get("mercato") and ph is not None:
+        vietato, motivo = _veto_contro_tendenza(pron["mercato"], ph, pa)
+        if vietato:
+            # lista ordinata dei mercati del signal per probabilità
+            scored = sorted(((m["mercato"], m.get("stat")) for m in signal
+                             if m.get("stat") is not None),
+                            key=lambda t: t[1], reverse=True)
+            nuovo, nconf, _ = _seleziona_con_veto(scored, ph, pa)
+            if nuovo:
+                pron_out = dict(pron)
+                pron_out["mercato"] = nuovo
+                pron_out["veto_ripiego"] = f"{pron['mercato']} bloccato ({motivo})"
+            else:
+                pron_out = dict(pron)
+                pron_out["mercato"] = None
+                pron_out["veto_ripiego"] = f"nessun pronostico giocabile ({motivo})"
+
+    # miglior pronostico per EV (solo dove ci sono quote): mercato con EV massimo positivo
+    miglior_ev = {"mercato": None, "ev": None}
+    val = ev.get("value") or {}
+    _best = None
+    for merc, d in val.items():
+        e = d.get("EV")
+        if e is None:
+            continue
+        if _best is None or e > _best[1]:
+            _best = (merc, e)
+    if _best:
+        miglior_ev = {"mercato": _best[0], "ev": round(_best[1] * 100, 1)}
+
     return {"home": home_name, "away": away_name, "sezioni": sezioni,
-            "pronostico": pron, "signal": signal,
+            "pronostico": pron_out, "signal": signal,
             "statistico": statistico,
             "pronostico_statistico": (statistico.get("best") if statistico else None),
             "pronostici_fusi": fusi,
             "fusione_media": {"mercato": fus_media_merc, "confidence": fus_media_conf},
-            "solo_statistico": {"mercato": stat_merc, "confidence": stat_conf}}
+            "solo_statistico": {"mercato": stat_merc, "confidence": stat_conf},
+            "miglior_ev": miglior_ev}

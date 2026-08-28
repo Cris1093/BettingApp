@@ -584,7 +584,7 @@ def upsert_pronostico(record):
     _opzionali = ("scheda_json", "riepilogo", "mercato_ragionato", "score_ragionato",
                   "merc_motore", "conf_motore", "merc_statistico", "conf_statistico",
                   "merc_fusione", "conf_fusione", "merc_solo_stat", "conf_solo_stat",
-                  "pron_cristiano")
+                  "merc_ev", "val_ev", "pron_cristiano")
     try:
         _do(record)
     except Exception:
@@ -593,7 +593,8 @@ def upsert_pronostico(record):
                 if k not in ("scheda_json", "mercato_ragionato", "score_ragionato",
                              "merc_motore", "conf_motore", "merc_statistico",
                              "conf_statistico", "merc_fusione", "conf_fusione",
-                             "merc_solo_stat", "conf_solo_stat", "pron_cristiano")}
+                             "merc_solo_stat", "conf_solo_stat", "merc_ev", "val_ev",
+                             "pron_cristiano")}
         try:
             _do(rec2)
         except Exception:
@@ -2863,6 +2864,47 @@ def genera_snapshot_prematch(df, comp_df, progress=None):
     return creati, saltati, primo_errore
 
 
+def _confronto_book(df, comp_df, concluse, recency_decay=None, home_adv=None):
+    """Confronta il motore col favorito del bookmaker sull'1X2, sulle partite dove ci sono
+    tutte e tre le quote (1, X, 2). Ritorna un dict con: n, accuratezze, e i casi di
+    DISSENSO (motore != favorito book) con chi ha ragione. None se nessuna partita utile."""
+    n = 0
+    mot_ok = book_ok = 0
+    diss_tot = diss_mot_ok = diss_book_ok = 0
+    for _, r in concluse.iterrows():
+        gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
+        if not (_num_ok(gc) and _num_ok(gt)):
+            continue
+        q1 = _quota_storica(r, "1"); qx = _quota_storica(r, "X"); q2 = _quota_storica(r, "2")
+        if not (q1 and qx and q2):
+            continue
+        esito = "1" if gc > gt else ("X" if gc == gt else "2")
+        fav = min((("1", q1), ("X", qx), ("2", q2)), key=lambda t: t[1])[0]
+        res = _backtest_una_partita(df, comp_df, r, recency_decay, home_adv)
+        if res is None:
+            continue
+        prob = res[0]
+        mot = max((("1", prob.get("1", 0)), ("X", prob.get("X", 0)), ("2", prob.get("2", 0))),
+                  key=lambda t: t[1])[0]
+        n += 1
+        if mot == esito:
+            mot_ok += 1
+        if fav == esito:
+            book_ok += 1
+        if mot != fav:
+            diss_tot += 1
+            if mot == esito:
+                diss_mot_ok += 1
+            if fav == esito:
+                diss_book_ok += 1
+    if n == 0:
+        return None
+    return {
+        "n": n, "mot_ok": mot_ok, "book_ok": book_ok,
+        "acc_mot": mot_ok / n * 100, "acc_book": book_ok / n * 100,
+        "diss_tot": diss_tot, "diss_mot_ok": diss_mot_ok, "diss_book_ok": diss_book_ok,
+    }
+
 
 def _report_backtest_testo(valutate, saltate, min_storico, tab, tab_tre, cal_sel, merc_sel, tab_roi, cal_tutti=None):
     """Costruisce un riepilogo TESTUALE del backtest (per copia-incolla rapido)."""
@@ -3134,6 +3176,39 @@ def pagina_backtest(user):
                       "riuscita": round(hit[eng][0] / (hit[eng][0] + hit[eng][1]) * 100, 1)
                       if (hit[eng][0] + hit[eng][1]) else None}
                 for eng in ("motore", "statistico", "fusione")}
+
+    # ---- CONFRONTO COL BOOKMAKER (1X2) ----
+    st.subheader("🆚 Motore vs Bookmaker (1X2)")
+    cb = _confronto_book(df, comp_df, concluse, recency_decay, home_adv)
+    if not cb:
+        st.caption("Nessuna partita con tutte e tre le quote 1, X, 2 salvate: "
+                   "il confronto col bookmaker non è disponibile.")
+    else:
+        st.caption(f"Confronto su {cb['n']} partite dove sono salvate tutte le quote 1/X/2. "
+                   "Il 'favorito' del book è l'esito con la quota più bassa.")
+        cc = st.columns(2)
+        cc[0].metric("🎯 Motore azzecca 1X2", f"{cb['acc_mot']:.0f}%",
+                     help=f"{cb['mot_ok']}/{cb['n']} esiti 1X2 corretti.")
+        cc[1].metric("🏦 Favorito book azzecca", f"{cb['acc_book']:.0f}%",
+                     help=f"{cb['book_ok']}/{cb['n']} esiti 1X2 corretti.")
+        if cb["diss_tot"] > 0:
+            st.markdown(f"**Quando il motore dissente dal book** ({cb['diss_tot']} partite "
+                        "dove il motore indica un esito diverso dal favorito del book):")
+            dd = st.columns(2)
+            dd[0].metric("Motore ha ragione", f"{cb['diss_mot_ok']}/{cb['diss_tot']}",
+                         help="Nei dissensi, quante volte l'esito del motore è quello reale.")
+            dd[1].metric("Book ha ragione", f"{cb['diss_book_ok']}/{cb['diss_tot']}")
+            if cb["diss_mot_ok"] > cb["diss_book_ok"]:
+                st.success("Nei casi di dissenso, il motore batte il book: è lì che può "
+                           "nascere il valore (il book sta sbagliando il favorito).")
+            elif cb["diss_mot_ok"] < cb["diss_book_ok"]:
+                st.info("Nei casi di dissenso vince più spesso il book. Normale: battere "
+                        "l'accuratezza del book è difficilissimo. Il valore si cerca sul "
+                        "PREZZO (ROI/EV), non sull'azzeccare più esiti.")
+            else:
+                st.info("Nei dissensi motore e book pari. Campione piccolo: leggi con cautela.")
+        st.caption("⚠️ Atteso: il book è quasi imbattibile sull'ACCURATEZZA pura. Il vero "
+                   "vantaggio si misura sul ROI (valore sul prezzo), non su chi azzecca di più.")
 
     # ---- METRICHE QUALITÀ MODELLO (protagoniste) ----
     st.subheader("Qualità delle probabilità (indipendente dalle quote)")
@@ -3932,6 +4007,8 @@ def pagina_analisi(user):
                     "merc_statistico": m_stat, "conf_statistico": c_stat,
                     "merc_fusione": m_fus, "conf_fusione": c_fus,
                     "merc_solo_stat": m_sstat, "conf_solo_stat": c_sstat,
+                    "merc_ev": (racc.get("miglior_ev") or {}).get("mercato") if racc else None,
+                    "val_ev": (racc.get("miglior_ev") or {}).get("ev") if racc else None,
                     "pron_cristiano": pron_cristiano.strip() if pron_cristiano else None,
                 })
                 salvati.add(sig)
@@ -4104,6 +4181,8 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False):
                 "conf_fusione": fm.get("confidence"),
                 "merc_solo_stat": ss.get("mercato"),
                 "conf_solo_stat": ss.get("confidence"),
+                "merc_ev": (racc.get("miglior_ev") or {}).get("mercato"),
+                "val_ev": (racc.get("miglior_ev") or {}).get("ev"),
             }
             cli.table("pronostici").update(upd).eq("id", r["id"]).execute()
             n += 1
@@ -4400,6 +4479,10 @@ def pagina_storico_pronostici(user):
             "✓F": cell["fusione"],
             "📊 Statistico": tre["solostat"][0] or "—", "Conf. S": tre["solostat"][1],
             "✓S": cell["solostat"],
+            "💰 EV": (lambda mv, vv: f"{mv} ({'+' if (vv or 0) >= 0 else ''}{vv}%)"
+                      if mv and vv is not None else (mv or "—"))(
+                          _txt(r.get("merc_ev")) if "merc_ev" in pron.columns else "",
+                          r.get("val_ev") if "val_ev" in pron.columns else None),
             "✍️ Cristiano": pron_cri or "—", "✓C": cell["cristiano"],
         })
 
@@ -4493,6 +4576,8 @@ def pagina_storico_pronostici(user):
             "📊 Statistico": st.column_config.Column(disabled=True),
             "Conf. S": st.column_config.Column(disabled=True),
             "✓S": st.column_config.Column(disabled=True),
+            "💰 EV": st.column_config.Column("💰 EV", disabled=True,
+                help="Mercato col valore atteso (EV) più alto e la sua percentuale."),
             "✍️ Cristiano": st.column_config.TextColumn(
                 "✍️ Cristiano", help="Il tuo pronostico (combo con '+'). Modificabile qui."),
             "✓C": st.column_config.Column(disabled=True),
