@@ -42,9 +42,22 @@ def _p(x):
 
 
 # --------------------------------------------------------------------- sezioni
+def _riga_finestra(nome, partite, n):
+    """Riga V/N/P + media gol su una finestra (ultime n)."""
+    import evidenze
+    sel = partite[:n] if n else partite
+    if not sel:
+        return None
+    b = evidenze._blocco(sel)
+    return (f"{nome} — ultime {len(sel)}: {b['v']}V {b['d']}N {b['s']}P, "
+            f"media {b['media_tot']} gol.")
+
+
 def _sintesi(home_name, away_name, ev):
     h, a = ev["home"], ev["away"]
     nh, na = ev["n_home"], ev["n_away"]
+    ph = ev.get("partite_home") or []
+    pa = ev.get("partite_away") or []
     righe = [
         f"{home_name} (casa) arriva da {nh} partite: "
         f"{h['generale']['v']}V {h['generale']['d']}N {h['generale']['s']}P, "
@@ -53,6 +66,12 @@ def _sintesi(home_name, away_name, ev):
         f"{a['generale']['v']}V {a['generale']['d']}N {a['generale']['s']}P, "
         f"media {a['generale']['media_tot']} gol a partita.",
     ]
+    # finestre recenti: ultime 10 e ultime 6
+    for nome, part in ((home_name, ph), (away_name, pa)):
+        for n in (10, 6):
+            r = _riga_finestra(nome, part, n)
+            if r:
+                righe.append(r)
     if min(nh, na) < 10:
         righe.append(f"⚠️ Campione limitato ({min(nh, na)} partite per una squadra): "
                      "i pattern vanno presi come indicativi, non consolidati.")
@@ -60,14 +79,66 @@ def _sintesi(home_name, away_name, ev):
 
 
 def _forma_generale(home_name, away_name, ev):
+    import evidenze
+
     def descr(nome, b):
         return (f"{nome}: Over 2.5 {_p(b['over'][2.5]['pct'])}, Under 2.5 {_p(b['under25']['pct'])}, "
                 f"Goal {_p(b['goal']['pct'])}, No Goal {_p(b['nogoal']['pct'])}, "
                 f"clean sheet {_p(b['clean']['pct'])}. "
                 f"Gol fatti {b['gf']}, subiti {b['gs']}.")
-    return {"titolo": "Forma generale",
-            "righe": [descr(home_name, ev["home"]["generale"]),
-                      descr(away_name, ev["away"]["generale"])]}
+
+    def descr_finestra(nome, partite, n):
+        sel = partite[:n] if n else partite
+        if len(sel) < 2:
+            return None
+        b = evidenze._blocco(sel)
+        return (f"{nome} (ultime {len(sel)}): Over 2.5 {_p(b['over'][2.5]['pct'])}, "
+                f"Goal {_p(b['goal']['pct'])}, No Goal {_p(b['nogoal']['pct'])}, "
+                f"clean {_p(b['clean']['pct'])}.")
+
+    ph = ev.get("partite_home") or []
+    pa = ev.get("partite_away") or []
+    righe = [descr(home_name, ev["home"]["generale"]),
+             descr(away_name, ev["away"]["generale"])]
+    for nome, part in ((home_name, ph), (away_name, pa)):
+        for n in (10, 6):
+            r = descr_finestra(nome, part, n)
+            if r:
+                righe.append(r)
+    return {"titolo": "Forma generale", "righe": righe}
+
+
+def _conta(partite, cond, n=None):
+    """Conta quante partite soddisfano cond su una finestra (ultime n o tutte)."""
+    sel = partite[:n] if n else partite
+    tot = len(sel)
+    k = sum(1 for p in sel if cond(p))
+    return k, tot
+
+
+def _incroci_gol(home_name, away_name, ev):
+    """Incroci: gol FATTI da una squadra vs gol SUBITI dall'altra, su soglie 0.5 e 1.5,
+    nelle finestre tutte / ultime 10 / ultime 5. È l'attacco di una contro la difesa
+    dell'altra — il cuore della lettura Over/gol."""
+    ph = ev.get("partite_home") or []
+    pa = ev.get("partite_away") or []
+    if not ph or not pa:
+        return None
+    righe = []
+    for soglia in (0.5, 1.5):
+        s = int(soglia)  # 0 o 1 (over 0.5 = gf>=1; over 1.5 = gf>=2)
+        for etich, n in (("tutte", None), ("ultime 10", 10), ("ultime 5", 5)):
+            # casa segna over soglia  vs  ospite subisce over soglia
+            hk, ht = _conta(ph, lambda p: p["gf"] > soglia, n)
+            ak, at = _conta(pa, lambda p: p["gs"] > soglia, n)
+            # viceversa
+            ak2, at2 = _conta(pa, lambda p: p["gf"] > soglia, n)
+            hk2, ht2 = _conta(ph, lambda p: p["gs"] > soglia, n)
+            righe.append(
+                f"Over {soglia} ({etich}) — {home_name} segna: {hk}/{ht} · "
+                f"{away_name} subisce: {ak}/{at}  |  "
+                f"{away_name} segna: {ak2}/{at2} · {home_name} subisce: {hk2}/{ht2}")
+    return {"titolo": "⚔️ Incroci gol (attacco vs difesa)", "righe": righe}
 
 
 def _casa_trasferta(home_name, away_name, ev):
@@ -851,6 +922,9 @@ def racconta(home_name, away_name, ev, signal, competizione=None, statistico=Non
     dist = _distribuzione_gol(home_name, away_name, ev)
     if dist:
         sezioni.append(dist)
+    incr = _incroci_gol(home_name, away_name, ev)
+    if incr:
+        sezioni.append(incr)
     sezioni.extend([
         _casa_trasferta(home_name, away_name, ev),
         _convergenze(ev),

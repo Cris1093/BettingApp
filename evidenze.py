@@ -510,4 +510,6 @@ def costruisci_evidenze(partite_home, partite_away, odds=None, variazioni=None,
         "n_away": away["generale"].get("n", 0),
         "n_eff_home": _n_effective(partite_home),
         "n_eff_away": _n_effective(partite_away),
+        "partite_home": partite_home,   # liste grezze (per finestre e incroci nel racconto)
+        "partite_away": partite_away,
     }
