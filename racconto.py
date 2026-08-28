@@ -66,12 +66,14 @@ def _sintesi(home_name, away_name, ev):
         f"{a['generale']['v']}V {a['generale']['d']}N {a['generale']['s']}P, "
         f"media {a['generale']['media_tot']} gol a partita.",
     ]
-    # finestre recenti: ultime 10 e ultime 6
-    for nome, part in ((home_name, ph), (away_name, pa)):
-        for n in (10, 6):
-            r = _riga_finestra(nome, part, n)
-            if r:
-                righe.append(r)
+    # finestre recenti contrapposte: ultime 10 (casa vs ospite), poi ultime 6
+    for n in (10, 6):
+        rh = _riga_finestra(home_name, ph, n)
+        ra = _riga_finestra(away_name, pa, n)
+        if rh:
+            righe.append(rh)
+        if ra:
+            righe.append(ra)
     if min(nh, na) < 10:
         righe.append(f"⚠️ Campione limitato ({min(nh, na)} partite per una squadra): "
                      "i pattern vanno presi come indicativi, non consolidati.")
@@ -100,11 +102,14 @@ def _forma_generale(home_name, away_name, ev):
     pa = ev.get("partite_away") or []
     righe = [descr(home_name, ev["home"]["generale"]),
              descr(away_name, ev["away"]["generale"])]
-    for nome, part in ((home_name, ph), (away_name, pa)):
-        for n in (10, 6):
-            r = descr_finestra(nome, part, n)
-            if r:
-                righe.append(r)
+    # finestre contrapposte: ultime 10 (casa vs ospite), poi ultime 6
+    for n in (10, 6):
+        rh = descr_finestra(home_name, ph, n)
+        ra = descr_finestra(away_name, pa, n)
+        if rh:
+            righe.append(rh)
+        if ra:
+            righe.append(ra)
     return {"titolo": "Forma generale", "righe": righe}
 
 
