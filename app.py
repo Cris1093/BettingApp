@@ -4141,20 +4141,32 @@ def pagina_analisi(user):
 # =============================================================================
 #  MAIN
 # =============================================================================
-def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False):
-    """Ricalcola e SALVA motore + fusione per i pronostici che non li hanno ancora.
-    Con forza=True ricalcola TUTTI (utile dopo aver cambiato la logica di fusione).
-    Ritorna il numero aggiornati."""
+def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False, limite=None,
+                        solo_da_aggiornare=False):
+    """Ricalcola e SALVA motore + fusione per i pronostici.
+    - forza=True: ricalcola tutti; altrimenti solo quelli senza motore/fusione.
+    - limite: elabora al massimo N pronostici (per lavorare A LOTTI ed evitare timeout).
+    - solo_da_aggiornare: salta quelli già aggiornati con la logica nuova (che hanno merc_ev
+      valorizzato o dove il motore non è più '12'), utile per riprendere.
+    Ritorna (aggiornati, rimasti_da_fare)."""
     cli = get_client()
     if not cli:
-        return 0
+        return 0, 0
     n = 0
+    da_fare = 0
     righe = list(pron.iterrows())
     for i, (_, r) in enumerate(righe):
-        if progress and i % 5 == 0:
-            progress.progress(i / max(1, len(righe)), text=f"Pronostico {i+1}/{len(righe)}…")
+        if progress and i % 3 == 0:
+            progress.progress(min(i / max(1, len(righe)), 1.0),
+                              text=f"Pronostico {i+1}/{len(righe)}…")
         if not forza and _txt(r.get("merc_motore")) and _txt(r.get("merc_fusione")):
             continue    # già completo (motore + fusione)
+        # modalità ripresa: salta quelli il cui motore NON è più '12' (già ricalcolati)
+        if solo_da_aggiornare and _txt(r.get("merc_motore")) not in ("12", ""):
+            continue
+        if limite is not None and n >= limite:
+            da_fare += 1
+            continue
         pid = _txt(r.get("partita_id"))
         if not pid:
             continue
@@ -4192,7 +4204,7 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False):
         except Exception:
             continue
     st.cache_data.clear()
-    return n
+    return n, da_fare
 
 
 def _config_default():
@@ -4345,17 +4357,34 @@ def pagina_storico_pronostici(user):
     if cc[2].button("⚙️ Popola motore+fusione (mancanti)"):
         _pr = st.progress(0.0, text="Ricalcolo in corso…")
         _pron = carica_pronostici()
-        _n = backfill_tre_motori(_pron, carica_partite(), carica_competizioni(), _pr)
+        _n, _ = backfill_tre_motori(_pron, carica_partite(), carica_competizioni(), _pr)
         _pr.progress(1.0, text="Completato.")
         st.success(f"Popolati {_n} pronostici. Ora restano salvati.")
         st.rerun()
-    if st.button("🔄 Ricalcola fusione per TUTTI (dopo modifiche logica)"):
-        _pr = st.progress(0.0, text="Ricalcolo completo in corso…")
-        _pron = carica_pronostici()
-        _n = backfill_tre_motori(_pron, carica_partite(), carica_competizioni(), _pr, forza=True)
-        _pr.progress(1.0, text="Completato.")
-        st.success(f"Ricalcolati {_n} pronostici (motore + fusione a media).")
+    if st.button("🔄 Ricalcola fusione per TUTTI (a lotti di 40)"):
+        _pron = carica_pronostici().reset_index(drop=True)
+        _cur = st.session_state.get("_ricalc_cursore", 0)
+        _lotto = _pron.iloc[_cur:_cur + 40]
+        _pr = st.progress(0.0, text=f"Ricalcolo lotto (da {_cur+1})…")
+        _n, _ = backfill_tre_motori(_lotto, carica_partite(), carica_competizioni(),
+                                    _pr, forza=True)
+        _pr.progress(1.0, text="Lotto completato.")
+        _nuovo_cur = _cur + 40
+        if _nuovo_cur < len(_pron):
+            st.session_state["_ricalc_cursore"] = _nuovo_cur
+            st.warning(f"Ricalcolati {_n} in questo lotto ({_nuovo_cur}/{len(_pron)}). "
+                       "Premi di nuovo per continuare col prossimo lotto.")
+        else:
+            st.session_state["_ricalc_cursore"] = 0
+            st.success(f"Completato! Tutti i {len(_pron)} pronostici ricalcolati.")
         st.rerun()
+    _cur_now = st.session_state.get("_ricalc_cursore", 0)
+    if _cur_now > 0:
+        st.caption(f"↩️ Ricalcolo a metà: {_cur_now} già fatti. Premi il pulsante per il "
+                   "prossimo lotto, oppure azzera qui sotto.")
+        if st.button("🔁 Azzera cursore ricalcolo"):
+            st.session_state["_ricalc_cursore"] = 0
+            st.rerun()
     if st.button("✨ Genera pronostici per le partite in attesa"):
         _pr = st.progress(0.0, text="Generazione in corso…")
         _creati, _s_gia, _s_dati, _err = genera_pronostici_mancanti(
