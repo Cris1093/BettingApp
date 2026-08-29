@@ -4385,6 +4385,10 @@ def _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config
     racc = analisi_ragionata(df_uso, home, away, data_partita=data_partita, odds=odds,
                              variazioni=variazioni, escludi_id=row.get("id"),
                              competizione=comp_target, indice=indice)
+    if racc is None:
+        # nessun racconto (storico insufficiente per il nuovo motore): senza i campi motore
+        # il pronostico sarebbe monco. Meglio non salvarlo e segnalarlo.
+        return None
     p = a["prob"]
     best = a["best"]
     testo = riepilogo_testo(a, df, home, away, odds, row=row)
