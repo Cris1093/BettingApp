@@ -3701,36 +3701,57 @@ def _giorni_tra(d1, d2):
         return None
 
 
+def costruisci_indice_squadre(df):
+    """Pre-raggruppa TUTTE le partite concluse per squadra, UNA volta sola. Ritorna un dict
+    {nome_squadra: [dict_partita, ...]} ordinato per data decrescente. Evita di riscansionare
+    l'intero df per ogni squadra (grande velocizzazione su database grandi)."""
+    if df is None or df.empty:
+        return {}
+    concl = df[df["gol_casa"].notna() & df["gol_trasferta"].notna()]
+    cols = ["id", "squadra_casa", "squadra_trasferta", "gol_casa", "gol_trasferta",
+            "data", "competizione"]
+    cols = [c for c in cols if c in concl.columns]
+    idx = {}
+    for row in concl[cols].itertuples(index=False):
+        r = dict(zip(cols, row))
+        idx.setdefault(r["squadra_casa"], []).append(r)
+        idx.setdefault(r["squadra_trasferta"], []).append(r)
+    for team in idx:
+        idx[team].sort(key=lambda m: m.get("data") or "", reverse=True)
+    return idx
+
+
 def _partite_squadra_evidenze(df, team, prima_di=None, escludi_id=None,
                               comp_df=None, target_livello=None, target_categoria=None,
-                              target_comp_key=None, recency_decay=None):
+                              target_comp_key=None, recency_decay=None, indice=None):
     """Estrae le partite giocate di una squadra nel formato del nuovo motore
     (gf/gs dal suo punto di vista, casa True/False, peso), dalla più recente. Filtra per
-    data < prima_di e ESCLUDE la fixture stessa. Assegna a ogni partita un PESO in base
-    al contesto (competizione) e, se recency_decay è dato, anche al DECADIMENTO temporale
-    rispetto alla data della fixture: peso_recency = exp(-giorni/decay)."""
-    if df.empty:
-        return []
-    d = df[(df["squadra_casa"] == team) | (df["squadra_trasferta"] == team)]
-    d = d[d["gol_casa"].notna() & d["gol_trasferta"].notna()]
-    if escludi_id is not None and "id" in d.columns:
-        d = d[d["id"] != escludi_id]
-    if prima_di is not None and "data" in d.columns:
-        try:
-            d = d[d["data"] < prima_di]
-        except Exception:
-            pass
-    if "data" in d.columns:
-        d = d.sort_values("data", ascending=False)
+    data < prima_di e ESCLUDE la fixture stessa. Assegna PESO per competizione e (opzionale)
+    decadimento temporale. Se 'indice' è fornito (costruisci_indice_squadre), usa quello
+    invece di riscansionare df: molto più veloce."""
     import math as _math
+    if indice is not None:
+        partite = indice.get(team, [])
+    else:
+        if df.empty:
+            return []
+        d = df[(df["squadra_casa"] == team) | (df["squadra_trasferta"] == team)]
+        d = d[d["gol_casa"].notna() & d["gol_trasferta"].notna()]
+        if "data" in d.columns:
+            d = d.sort_values("data", ascending=False)
+        partite = [dict(zip(d.columns, row)) for row in d.itertuples(index=False)]
+
     out = []
-    for _, m in d.iterrows():
+    for m in partite:
+        if escludi_id is not None and str(m.get("id")) == str(escludi_id):
+            continue
+        if prima_di is not None and m.get("data") is not None and not (m["data"] < prima_di):
+            continue
         peso, motivo = 1.0, None
         if comp_df is not None:
             peso, motivo = _peso_partita(m.get("competizione"), comp_df,
                                          target_livello, target_categoria, target_comp_key)
-        # decadimento temporale (opzionale): pesa di più le partite recenti
-        if recency_decay and prima_di is not None and "data" in m:
+        if recency_decay and prima_di is not None and m.get("data") is not None:
             gg = _giorni_tra(m.get("data"), prima_di)
             if gg is not None:
                 peso = peso * _math.exp(-gg / float(recency_decay))
@@ -3767,15 +3788,15 @@ def _handicap_livello(partite, target_livello):
     return max(0.55, 1.0 - 0.28 * diff)   # ogni livello sotto -> ~28% di handicap
 
 
-def analisi_ragionata(df, home, away, data_partita=None, odds=None, variazioni=None, escludi_id=None, competizione=None, recency_decay=None):
+def analisi_ragionata(df, home, away, data_partita=None, odds=None, variazioni=None, escludi_id=None, competizione=None, recency_decay=None, indice=None):
     """Ponte verso il nuovo motore: evidenze -> signal score -> racconto.
     Ritorna il dict del racconto, oppure None se manca lo storico."""
     comp_df = carica_competizioni()
     t_liv = _livello_di(competizione, comp_df) if competizione else None
     t_cat = categoria_di(competizione, comp_df) if competizione else None
     t_key = _key(competizione) if competizione else None
-    ph = _partite_squadra_evidenze(df, home, data_partita, escludi_id, comp_df, t_liv, t_cat, t_key, recency_decay)
-    pa = _partite_squadra_evidenze(df, away, data_partita, escludi_id, comp_df, t_liv, t_cat, t_key, recency_decay)
+    ph = _partite_squadra_evidenze(df, home, data_partita, escludi_id, comp_df, t_liv, t_cat, t_key, recency_decay, indice)
+    pa = _partite_squadra_evidenze(df, away, data_partita, escludi_id, comp_df, t_liv, t_cat, t_key, recency_decay, indice)
     if not ph or not pa:
         return None
     hcap_h = _handicap_livello(ph, t_liv)
@@ -4239,6 +4260,7 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False, lim
         return 0, 0
     n = 0
     da_fare = 0
+    indice = costruisci_indice_squadre(df_tutte)   # UNA volta sola: velocizza tutto il ciclo
     righe = list(pron.iterrows())
     for i, (_, r) in enumerate(righe):
         if progress and i % 3 == 0:
@@ -4265,7 +4287,7 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False, lim
                     odds = _eff_odds(mrow.iloc[0])   # quote salvate -> abilita l'EV
             racc = analisi_ragionata(df_tutte, r.get("squadra_casa"), r.get("squadra_trasferta"),
                                      data_partita=r.get("data"), escludi_id=pid,
-                                     competizione=comp, odds=odds)
+                                     competizione=comp, odds=odds, indice=indice)
             if not racc:
                 continue
             pm = racc.get("pronostico") or {}
@@ -4326,10 +4348,11 @@ def _livelli_da_comp(comp_df):
     return livelli
 
 
-def _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config):
+def _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config, indice=None):
     """Calcola il record completo del pronostico per una fixture (senza salvarlo).
     Replica esattamente ciò che fa il salvataggio automatico nella pagina Analisi.
-    Ritorna il dict pronto per upsert_pronostico, o None se dati insufficienti."""
+    Ritorna il dict pronto per upsert_pronostico, o None se dati insufficienti.
+    Se 'indice' è fornito, usa un df ridotto (solo le due squadre) per velocizzare i motori."""
     home, away = row["squadra_casa"], row["squadra_trasferta"]
     odds = _eff_odds(row)
     data_partita = row.get("data")
@@ -4343,7 +4366,15 @@ def _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config
             mapk = {"x": "X", "over": "over25", "under": "under25"}.get(kk, kk)
             variazioni[mapk] = float(v)
 
-    a = analisi.analizza_partita(home, away, df, odds=odds, data_partita=data_partita,
+    # df RIDOTTO alle sole partite delle due squadre (dal df completo): rende veloce il
+    # vecchio motore, che altrimenti riscansiona tutto il database per ogni fixture.
+    df_uso = df
+    if indice is not None:
+        mask = ((df["squadra_casa"] == home) | (df["squadra_trasferta"] == home) |
+                (df["squadra_casa"] == away) | (df["squadra_trasferta"] == away))
+        df_uso = df[mask]
+
+    a = analisi.analizza_partita(home, away, df_uso, odds=odds, data_partita=data_partita,
                                  config=config, calibratori=calibratori, rose=rose,
                                  tipo_partita_target=tipo_target, livelli=livelli,
                                  variazioni=variazioni)
@@ -4351,9 +4382,9 @@ def _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config
         return None
 
     comp_target = _label_da_comp(row.get("competizione"), comp_df)
-    racc = analisi_ragionata(df, home, away, data_partita=data_partita, odds=odds,
+    racc = analisi_ragionata(df_uso, home, away, data_partita=data_partita, odds=odds,
                              variazioni=variazioni, escludi_id=row.get("id"),
-                             competizione=comp_target)
+                             competizione=comp_target, indice=indice)
     p = a["prob"]
     best = a["best"]
     testo = riepilogo_testo(a, df, home, away, odds, row=row)
@@ -4411,6 +4442,7 @@ def genera_pronostici_mancanti(df, comp_df, pron, progress=None):
     calibratori = carica_calibrazione()
     livelli = _livelli_da_comp(comp_df)
     config = _config_default()
+    indice = costruisci_indice_squadre(df)   # UNA volta sola per tutto il ciclo
     creati = saltati_gia = saltati_dati = 0
     primo_errore = None
     righe = list(fixtures.iterrows())
@@ -4422,7 +4454,7 @@ def genera_pronostici_mancanti(df, comp_df, pron, progress=None):
             saltati_gia += 1
             continue
         try:
-            rec = _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config)
+            rec = _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config, indice)
             if rec is None:
                 saltati_dati += 1
                 continue
