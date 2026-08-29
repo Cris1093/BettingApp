@@ -4556,6 +4556,7 @@ def pagina_storico_pronostici(user):
     righe = []
     conteggi = {"motore": [0, 0], "fusione": [0, 0], "solostat": [0, 0],
                 "ev": [0, 0], "cristiano": [0, 0]}
+    rank_1x2 = [0, 0, 0]   # [più probabile, medio, meno probabile]
     aperti = 0
     for _, r in pron.iterrows():
         gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
@@ -4564,6 +4565,11 @@ def pagina_storico_pronostici(user):
         merc_ev = _txt(r.get("merc_ev")) if "merc_ev" in pron.columns else ""
         val_ev = r.get("val_ev") if "val_ev" in pron.columns else None
         quota_ev = r.get("quota_ev") if "quota_ev" in pron.columns else None
+        # probabilità 1X2 del motore (salvate)
+        p1 = r.get("prob_1") if "prob_1" in pron.columns else None
+        px = r.get("prob_x") if "prob_x" in pron.columns else None
+        p2 = r.get("prob_2") if "prob_2" in pron.columns else None
+        has_1x2 = all(v is not None and not pd.isna(v) for v in (p1, px, p2))
         cell = {}
         if gc is not None and gt is not None and not (pd.isna(gc) or pd.isna(gt)):
             ris = f"{int(gc)}-{int(gt)}"
@@ -4593,10 +4599,23 @@ def pagina_storico_pronostici(user):
                 cell["cristiano"] = "❌"; conteggi["cristiano"][1] += 1
             else:
                 cell["cristiano"] = "—" if pron_cri else ""
+            # esito 1X2 per rango di probabilità del motore
+            if has_1x2:
+                segni = sorted([("1", float(p1)), ("X", float(px)), ("2", float(p2))],
+                               key=lambda t: t[1], reverse=True)
+                segno_reale = "1" if int(gc) > int(gt) else ("X" if int(gc) == int(gt) else "2")
+                rango = [s for s, _ in segni].index(segno_reale)  # 0=più prob, 1=medio, 2=meno
+                cell["1x2"] = "✅" if rango == 0 else ("🟧" if rango == 1 else "❌")
+                cell["segno_reale"] = segno_reale
+                rank_1x2[rango] += 1
+            else:
+                cell["1x2"] = ""; cell["segno_reale"] = ""
         else:
             ris = "in attesa"; aperti += 1
             for eng in ("motore", "fusione", "solostat", "ev", "cristiano"):
                 cell[eng] = ""
+            cell["1x2"] = ""; cell["segno_reale"] = ""
+        _prob_txt = (f"{float(p1):.0f}/{float(px):.0f}/{float(p2):.0f}" if has_1x2 else "—")
         righe.append({
             "_pid": _txt(r.get("partita_id")),   # id nascosto per il salvataggio (regge il filtro)
             "Data": r.get("data"), "Casa": r.get("squadra_casa"),
@@ -4615,6 +4634,7 @@ def pagina_storico_pronostici(user):
                             if merc_ev and val_ev is not None else (merc_ev or "—"))),
             "✓EV": cell["ev"],
             "✍️ Cristiano": pron_cri or "—", "✓C": cell["cristiano"],
+            "1X2 (prob)": _prob_txt, "Segno": cell["segno_reale"], "✓1X2": cell["1x2"],
         })
 
     st.markdown("**Riuscita dei pronostici**")
@@ -4634,6 +4654,13 @@ def pagina_storico_pronostici(user):
                 st.caption("Nessuno concluso.")
     if aperti:
         st.caption(f"{aperti} in attesa di risultato.")
+
+    _tot_1x2 = sum(rank_1x2)
+    if _tot_1x2:
+        st.caption(f"**Segno 1X2 del motore** su {_tot_1x2} partite concluse: "
+                   f"✅ più probabile {rank_1x2[0]} ({rank_1x2[0]/_tot_1x2*100:.0f}%) · "
+                   f"🟧 di mezzo {rank_1x2[1]} ({rank_1x2[1]/_tot_1x2*100:.0f}%) · "
+                   f"❌ meno probabile {rank_1x2[2]} ({rank_1x2[2]/_tot_1x2*100:.0f}%)")
 
     # opzioni competizione per il menu a tendina: anagrafica + TUTTE quelle nei dati
     comp_opts = [""]
@@ -4714,6 +4741,12 @@ def pagina_storico_pronostici(user):
             "✍️ Cristiano": st.column_config.TextColumn(
                 "✍️ Cristiano", help="Il tuo pronostico (combo con '+'). Modificabile qui."),
             "✓C": st.column_config.Column(disabled=True),
+            "1X2 (prob)": st.column_config.Column("1X2 (prob)", disabled=True,
+                help="Probabilità 1/X/2 del motore."),
+            "Segno": st.column_config.Column("Segno", disabled=True,
+                help="Segno realmente uscito."),
+            "✓1X2": st.column_config.Column("✓1X2", disabled=True,
+                help="✅ = uscito il segno più probabile · 🟧 = segno di mezzo · ❌ = meno probabile."),
         })
 
     if st.button("💾 Salva risultati e competizioni", type="primary"):
