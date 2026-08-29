@@ -4524,22 +4524,33 @@ def pagina_storico_pronostici(user):
         _creati, _s_gia, _s_dati, _err, _diag = genera_pronostici_mancanti(
             carica_partite(), carica_competizioni(), carica_pronostici(), _pr)
         _pr.progress(1.0, text="Completato.")
-        st.success(f"Creati e SALVATI {_creati} nuovi pronostici. "
-                   f"Saltati {_s_gia} (già salvati) · {_s_dati} (storico insufficiente).")
-        # diagnostica: aiuta a capire perché non genera
-        st.caption(f"🔍 Diagnostica: {_diag['tot_partite']} partite totali · "
-                   f"{_diag['is_target']} marcate 'da pronosticare' (is_target) · "
-                   f"{_diag['senza_pron']} senza pronostico da elaborare.")
-        if _diag["is_target"] == 0:
+        # salvo l'esito in sessione: sopravvive al rerun e resta visibile
+        st.session_state["_gen_esito"] = {
+            "creati": _creati, "s_gia": _s_gia, "s_dati": _s_dati,
+            "err": _err, "diag": _diag}
+        st.cache_data.clear()
+        st.rerun()
+
+    # mostra l'esito dell'ultima generazione (persistente dopo il rerun)
+    _ge = st.session_state.get("_gen_esito")
+    if _ge:
+        _d = _ge["diag"]
+        st.success(f"Creati e SALVATI {_ge['creati']} nuovi pronostici. "
+                   f"Saltati {_ge['s_gia']} (già salvati) · {_ge['s_dati']} (storico insufficiente).")
+        st.caption(f"🔍 Diagnostica: {_d['tot_partite']} partite totali · "
+                   f"{_d['is_target']} marcate 'da pronosticare' (is_target) · "
+                   f"{_d['senza_pron']} senza pronostico da elaborare.")
+        if _d["is_target"] == 0:
             st.warning("⚠️ Nessuna partita è marcata come 'da pronosticare' (is_target=True). "
                        "I pronostici si generano solo per le fixture target. Verifica che le "
                        "partite in attesa siano state salvate come target dall'estrattore.")
-        elif _diag["senza_pron"] == 0:
+        elif _d["senza_pron"] == 0:
             st.info("Tutte le fixture target hanno già un pronostico salvato: niente da generare.")
-        if _err:
-            st.error(f"⚠️ Motivo dei saltati (primo caso): {_err}")
-        st.cache_data.clear()
-        st.rerun()
+        if _ge["err"]:
+            st.error(f"⚠️ Motivo dei saltati (primo caso): {_ge['err']}")
+        if st.button("✖️ Nascondi esito"):
+            st.session_state.pop("_gen_esito", None)
+            st.rerun()
 
     pron = carica_pronostici()
     if pron.empty:
