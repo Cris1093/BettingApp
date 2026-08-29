@@ -4285,6 +4285,14 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False, lim
                 "val_ev": (racc.get("miglior_ev") or {}).get("ev"),
                 "quota_ev": (racc.get("miglior_ev") or {}).get("quota"),
             }
+            # probabilità 1X2 del nuovo motore (0-100): erano il vero motivo dei "0/0/0"
+            _p1x2 = racc.get("prob_1x2") or {}
+            if _p1x2.get("1") is not None:
+                upd["prob_1"] = float(_p1x2["1"])
+            if _p1x2.get("X") is not None:
+                upd["prob_x"] = float(_p1x2["X"])
+            if _p1x2.get("2") is not None:
+                upd["prob_2"] = float(_p1x2["2"])
             cli.table("pronostici").update(upd).eq("id", r["id"]).execute()
             n += 1
         except Exception:
@@ -4449,15 +4457,15 @@ def pagina_storico_pronostici(user):
         _pr.progress(1.0, text="Completato.")
         st.success(f"Popolati {_n} pronostici. Ora restano salvati.")
         st.rerun()
-    if st.button("🔄 Ricalcola fusione per TUTTI (a lotti di 40)"):
+    if st.button("🔄 Ricalcola fusione per TUTTI (a lotti di 100)"):
         _pron = carica_pronostici().reset_index(drop=True)
         _cur = st.session_state.get("_ricalc_cursore", 0)
-        _lotto = _pron.iloc[_cur:_cur + 40]
+        _lotto = _pron.iloc[_cur:_cur + 100]
         _pr = st.progress(0.0, text=f"Ricalcolo lotto (da {_cur+1})…")
         _n, _ = backfill_tre_motori(_lotto, carica_partite(), carica_competizioni(),
                                     _pr, forza=True)
         _pr.progress(1.0, text="Lotto completato.")
-        _nuovo_cur = _cur + 40
+        _nuovo_cur = _cur + 100
         if _nuovo_cur < len(_pron):
             st.session_state["_ricalc_cursore"] = _nuovo_cur
             st.warning(f"Ricalcolati {_n} in questo lotto ({_nuovo_cur}/{len(_pron)}). "
