@@ -1140,4 +1140,7 @@ def racconta(home_name, away_name, ev, signal, competizione=None, statistico=Non
             "fusione_media": {"mercato": fus_media_merc, "confidence": fus_media_conf},
             "solo_statistico": {"mercato": stat_merc, "confidence": stat_conf},
             "miglior_ev": miglior_ev,
-            "primo_pronostico": primo_merc, "primo_bloccato": primo_bloccato}
+            "primo_pronostico": primo_merc, "primo_bloccato": primo_bloccato,
+            "prob_1x2": {"1": (ev.get("prob") or {}).get("1"),
+                         "X": (ev.get("prob") or {}).get("X"),
+                         "2": (ev.get("prob") or {}).get("2")}}
