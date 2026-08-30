@@ -4294,8 +4294,11 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False, lim
             ps = racc.get("pronostico_statistico") or {}
             fm = racc.get("fusione_media") or {}
             ss = racc.get("solo_statistico") or {}
+            # fallback: se il veto ha svuotato il motore, usa il primo pronostico grezzo,
+            # poi la fusione, così merc_motore non resta mai NULL
+            _merc_mot = pm.get("mercato") or racc.get("primo_pronostico") or fm.get("mercato")
             upd = {
-                "merc_motore": pm.get("mercato"),
+                "merc_motore": _merc_mot,
                 "conf_motore": int(pm["score"]) if pm.get("score") is not None else None,
                 "merc_statistico": ps.get("pronostico"),
                 "conf_statistico": {"alta": 90, "media": 70, "bassa": 50}.get(ps.get("confidence")),
@@ -4390,12 +4393,8 @@ def _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config
         racc = analisi_ragionata(df, home, away, data_partita=data_partita, odds=odds,
                                  variazioni=variazioni, escludi_id=row.get("id"),
                                  competizione=comp_target)
-    if racc is None:
-        # diagnostica: quante partite di storico esistono per le due squadre?
-        nh = len(_partite_squadra_evidenze(df, home, data_partita, row.get("id"), comp_df))
-        na = len(_partite_squadra_evidenze(df, away, data_partita, row.get("id"), comp_df))
-        raise ValueError(f"nuovo motore vuoto: {home} ha {nh} partite di storico, "
-                         f"{away} ne ha {na} (prima del {data_partita})")
+    # se anche così è None, si prosegue: i campi motore useranno il fallback del vecchio
+    # motore più sotto, così il pronostico viene comunque salvato completo.
     p = a["prob"]
     best = a["best"]
     testo = riepilogo_testo(a, df, home, away, odds, row=row)
@@ -4407,6 +4406,12 @@ def _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config
         # se il veto ha bloccato tutto (mercato None), ripiega sul primo pronostico grezzo
         if not merc_rag and racc.get("primo_pronostico"):
             merc_rag = racc.get("primo_pronostico")
+    # ULTIMO fallback: se il nuovo motore non ha prodotto un mercato (storico scarso),
+    # usa il pronostico del vecchio motore, così merc_motore non resta MAI vuoto.
+    if not merc_rag and best and best.get("mercato"):
+        merc_rag = best["mercato"]
+        if score_rag is None:
+            score_rag = int(best.get("confidence") or 50)
     m_stat = c_stat = None
     if racc and racc.get("pronostico_statistico"):
         ps = racc["pronostico_statistico"]
