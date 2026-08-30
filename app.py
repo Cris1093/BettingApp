@@ -3701,6 +3701,19 @@ def _giorni_tra(d1, d2):
         return None
 
 
+def _norm_data(d):
+    """Normalizza una data (stringa 'YYYY-MM-DD', datetime.date/datetime, o altro) a stringa
+    ISO 'YYYY-MM-DD' per confronti omogenei. Evita il TypeError date vs str."""
+    if d is None:
+        return None
+    if isinstance(d, str):
+        return d[:10]   # 'YYYY-MM-DD...' -> 'YYYY-MM-DD'
+    try:
+        return d.strftime("%Y-%m-%d")   # date/datetime
+    except Exception:
+        return str(d)[:10]
+
+
 def costruisci_indice_squadre(df):
     """Pre-raggruppa TUTTE le partite concluse per squadra, UNA volta sola. Ritorna un dict
     {nome_squadra: [dict_partita, ...]} ordinato per data decrescente. Evita di riscansionare
@@ -3717,7 +3730,7 @@ def costruisci_indice_squadre(df):
         idx.setdefault(r["squadra_casa"], []).append(r)
         idx.setdefault(r["squadra_trasferta"], []).append(r)
     for team in idx:
-        idx[team].sort(key=lambda m: m.get("data") or "", reverse=True)
+        idx[team].sort(key=lambda m: _norm_data(m.get("data")) or "", reverse=True)
     return idx
 
 
@@ -3742,10 +3755,11 @@ def _partite_squadra_evidenze(df, team, prima_di=None, escludi_id=None,
         partite = [dict(zip(d.columns, row)) for row in d.itertuples(index=False)]
 
     out = []
+    _prima = _norm_data(prima_di) if prima_di is not None else None
     for m in partite:
         if escludi_id is not None and str(m.get("id")) == str(escludi_id):
             continue
-        if prima_di is not None and m.get("data") is not None and not (m["data"] < prima_di):
+        if _prima is not None and m.get("data") is not None and not (_norm_data(m["data"]) < _prima):
             continue
         peso, motivo = 1.0, None
         if comp_df is not None:
