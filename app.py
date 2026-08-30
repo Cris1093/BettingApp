@@ -4385,10 +4385,17 @@ def _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config
     racc = analisi_ragionata(df_uso, home, away, data_partita=data_partita, odds=odds,
                              variazioni=variazioni, escludi_id=row.get("id"),
                              competizione=comp_target, indice=indice)
+    # fallback: se col df ridotto/indice non esce nulla, riprova col df COMPLETO senza indice
     if racc is None:
-        # nessun racconto (storico insufficiente per il nuovo motore): senza i campi motore
-        # il pronostico sarebbe monco. Meglio non salvarlo e segnalarlo.
-        return None
+        racc = analisi_ragionata(df, home, away, data_partita=data_partita, odds=odds,
+                                 variazioni=variazioni, escludi_id=row.get("id"),
+                                 competizione=comp_target)
+    if racc is None:
+        # diagnostica: quante partite di storico esistono per le due squadre?
+        nh = len(_partite_squadra_evidenze(df, home, data_partita, row.get("id"), comp_df))
+        na = len(_partite_squadra_evidenze(df, away, data_partita, row.get("id"), comp_df))
+        raise ValueError(f"nuovo motore vuoto: {home} ha {nh} partite di storico, "
+                         f"{away} ne ha {na} (prima del {data_partita})")
     p = a["prob"]
     best = a["best"]
     testo = riepilogo_testo(a, df, home, away, odds, row=row)
@@ -4397,6 +4404,9 @@ def _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config
     if racc and racc.get("pronostico"):
         merc_rag = racc["pronostico"].get("mercato")
         score_rag = racc["pronostico"].get("score")
+        # se il veto ha bloccato tutto (mercato None), ripiega sul primo pronostico grezzo
+        if not merc_rag and racc.get("primo_pronostico"):
+            merc_rag = racc.get("primo_pronostico")
     m_stat = c_stat = None
     if racc and racc.get("pronostico_statistico"):
         ps = racc["pronostico_statistico"]
