@@ -4289,6 +4289,28 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False, lim
                                      data_partita=r.get("data"), escludi_id=pid,
                                      competizione=comp, odds=odds, indice=indice)
             if not racc:
+                # il nuovo motore non ha prodotto nulla (una squadra senza storico nel DB):
+                # invece di SALTARE (lasciando merc_motore NULL), calcola col vecchio motore
+                # così il pronostico viene comunque completato.
+                try:
+                    _cfg = _config_default()
+                    _cal = carica_calibrazione()
+                    _liv = _livelli_da_comp(comp_df)
+                    a_old = analisi.analizza_partita(
+                        r.get("squadra_casa"), r.get("squadra_trasferta"), df_tutte,
+                        odds=odds, data_partita=r.get("data"), config=_cfg,
+                        calibratori=_cal, livelli=_liv)
+                    if not a_old.get("errore") and a_old.get("best"):
+                        _b = a_old["best"]
+                        cli.table("pronostici").update({
+                            "merc_motore": _b.get("mercato"),
+                            "conf_motore": int(_b.get("confidence") or 50),
+                            "merc_fusione": _b.get("mercato"),
+                            "conf_fusione": int(_b.get("confidence") or 50),
+                        }).eq("id", r["id"]).execute()
+                        n += 1
+                except Exception:
+                    pass
                 continue
             pm = racc.get("pronostico") or {}
             ps = racc.get("pronostico_statistico") or {}
@@ -4538,6 +4560,25 @@ def pagina_storico_pronostici(user):
         if st.button("🔁 Azzera cursore ricalcolo"):
             st.session_state["_ricalc_cursore"] = 0
             st.rerun()
+
+    # --- DIAGNOSTICA: perché alcuni pronostici restano senza motore? ---
+    if st.button("🔬 Diagnostica pronostici senza motore"):
+        _pron = carica_pronostici()
+        _df = carica_partite()
+        _cd = carica_competizioni()
+        senza = _pron[_pron["merc_motore"].isna() | (_pron["merc_motore"].astype(str).str.strip() == "")] \
+            if "merc_motore" in _pron.columns else _pron.iloc[0:0]
+        st.markdown(f"**{len(senza)} pronostici senza motore.** Analizzo i primi 10:")
+        for _, rr in senza.head(10).iterrows():
+            h, a = rr.get("squadra_casa"), rr.get("squadra_trasferta")
+            dp, pid = rr.get("data"), _txt(rr.get("partita_id"))
+            nh = len(_partite_squadra_evidenze(_df, h, dp, pid, _cd))
+            na = len(_partite_squadra_evidenze(_df, a, dp, pid, _cd))
+            racc_test = analisi_ragionata(_df, h, a, data_partita=dp, escludi_id=pid)
+            merc = (racc_test.get("pronostico") or {}).get("mercato") if racc_test else "racc=None"
+            st.text(f"{h} vs {a} ({dp}) → storico: casa {nh}, ospite {na} · racc: {merc}")
+        st.caption("Se 'storico casa/ospite' è 0 → quella squadra non ha partite concluse nel DB "
+                   "(nome diverso o storico mai inserito). Se ha storico ma racc=None → bug motore.")
     if st.button("✨ Genera pronostici per le partite in attesa"):
         _pr = st.progress(0.0, text="Generazione in corso…")
         _creati, _s_gia, _s_dati, _err, _diag = genera_pronostici_mancanti(
