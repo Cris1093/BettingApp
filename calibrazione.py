@@ -15,31 +15,36 @@ complementare si ricava per coerenza (Under = 100 - Over calibrato).
 """
 
 # punti di calibrazione osservati (prob dichiarata % -> prob reale %), dal backtest.
-# Fonte Over 2.5 (tabella calibrazione a 128 partite):
-#   35->33, 50->39, 67->46, 82->60
-# Over 2.5 (e 3.5): il modello SOVRASTIMAVA -> la curva abbassa. Tarata sul backtest.
-_PUNTI_OVER = [(0, 0), (35, 33), (50, 39), (67, 46), (82, 60), (100, 75)]
-# Over 1.5: il modello GREZZO sovrastima LEGGERMENTE (raw ~72 -> reale ~67; raw ~88 -> reale
-# ~73). La vecchia curva _PUNTI_OVER abbassava TROPPO. Qui una correzione GENTILE che abbassa
-# di poco, coerente coi dati del backtest (144 partite). Da raffinare con più dati.
-_PUNTI_OVER15 = [(0, 0), (50, 48), (72, 67), (88, 73), (100, 80)]
-# Goal/NoGoal: lieve sovrastima.
-_PUNTI_GOAL = [(0, 0), (40, 36), (55, 46), (65, 50), (80, 63), (100, 80)]
+# ============================================================================
+# CALIBRAZIONE GOL — ritarata sul backtest a 454 partite (fasce da 200-350 casi, solide).
+# Scoperta: su campione grande il modello SOTTOSTIMA i gol in modo sistematico. Le vecchie
+# curve (tarate su ~150 partite) abbassavano troppo. Queste ALZANO, puntando ai valori reali
+# osservati. Curve separate per ogni linea (scarti diversi). raw = prob grezza -> calibrata.
+# ============================================================================
+# Over 2.5: dice 35->reale 45, dice 45->reale 63. Invertito: raw 41->45, raw 65->63.
+_PUNTI_OVER25 = [(0, 0), (41, 45), (65, 63), (85, 82), (100, 92)]
+# Over 3.5: dice 15->20, 31->36, 42->65. Invertito: raw 16->20, raw 32->36, raw 58->65.
+_PUNTI_OVER35 = [(0, 0), (16, 20), (32, 36), (58, 65), (80, 82), (100, 92)]
+# Over 1.5: dice 55->61, 69->78. Invertito: raw 58->61, raw 78->79 (quasi identità in alto).
+_PUNTI_OVER15 = [(0, 0), (58, 61), (78, 79), (90, 88), (100, 95)]
+# Goal: dice 35->41, 47->61. Invertito: raw 39->41, raw 57->61.
+_PUNTI_GOAL = [(0, 0), (39, 41), (57, 61), (75, 78), (100, 90)]
+# (compat: alcune parti del codice referenziano ancora _PUNTI_OVER)
+_PUNTI_OVER = _PUNTI_OVER25
 
-# "2" (vittoria ospite): il modello SOVRASTIMA nella fascia dove si gioca (dice ~30 -> reale
-# ~22), causando false opportunità di value. Curva che ABBASSA il 2 in quella fascia.
-# La fascia 40-60% (dice 48 -> reale 75) ha pochissimi dati (N=12): NON la inseguo, resto
-# prudente. La differenza tolta al 2 viene ridistribuita su 1 e X (vedi calibra_prob).
-_PUNTI_2 = [(0, 0), (17, 18), (30, 22), (40, 33), (60, 58), (100, 100)]
+# "2" (vittoria ospite): su 454 partite dice ~25 -> reale ~32 (fascia 20-40, N=374):
+# ora SOTTOSTIMA leggermente. Curva che alza un po' in quella fascia. Differenza ridistribuita.
+_PUNTI_2 = [(0, 0), (18, 15), (25, 32), (48, 50), (100, 100)]
 
 # quali mercati calibrare e con quale curva (il "lato positivo" del gruppo)
 _GRUPPI = {
-    "Over 2.5": ("_PUNTI_OVER", "Under 2.5"),
+    "Over 2.5": ("_PUNTI_OVER25", "Under 2.5"),
     "Over 1.5": ("_PUNTI_OVER15", "Under 1.5"),
-    "Over 3.5": ("_PUNTI_OVER", "Under 3.5"),
+    "Over 3.5": ("_PUNTI_OVER35", "Under 3.5"),
     "Goal": ("_PUNTI_GOAL", "No Goal"),
 }
-_CURVE = {"_PUNTI_OVER": _PUNTI_OVER, "_PUNTI_OVER15": _PUNTI_OVER15, "_PUNTI_GOAL": _PUNTI_GOAL}
+_CURVE = {"_PUNTI_OVER25": _PUNTI_OVER25, "_PUNTI_OVER35": _PUNTI_OVER35,
+          "_PUNTI_OVER15": _PUNTI_OVER15, "_PUNTI_GOAL": _PUNTI_GOAL}
 
 # mercati 1X2: ben calibrati, nessuna correzione
 _NON_CALIBRARE = {"1", "X", "2", "1X", "X2", "12"}
