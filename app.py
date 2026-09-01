@@ -3714,6 +3714,18 @@ def _norm_data(d):
         return str(d)[:10]
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _mappa_comp_per_id():
+    """Mappa partita_id -> codice competizione, in CACHE. Evita di riscorrere tutte le
+    partite a ogni ricaricamento della pagina (era la causa della lentezza a ogni tasto)."""
+    df = carica_partite()
+    if df.empty or "id" not in df.columns:
+        return {}
+    ids = df["id"].astype(str).tolist()
+    comps = df["competizione"].tolist() if "competizione" in df.columns else [None] * len(ids)
+    return dict(zip(ids, comps))
+
+
 def costruisci_indice_squadre(df):
     """Pre-raggruppa TUTTE le partite concluse per squadra, UNA volta sola. Ritorna un dict
     {nome_squadra: [dict_partita, ...]} ordinato per data decrescente. Evita di riscansionare
@@ -4274,7 +4286,12 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False, lim
         return 0, 0
     n = 0
     da_fare = 0
-    indice = costruisci_indice_squadre(df_tutte)   # UNA volta sola: velocizza tutto il ciclo
+    # costruisci l'indice SOLO se c'è davvero qualcosa da elaborare (evita lavoro inutile
+    # quando è tutto già completo, es. dopo un ricalcolo)
+    serve_lavoro = forza or any(
+        not (_txt(r.get("merc_motore")) and _txt(r.get("merc_fusione")))
+        for _, r in pron.iterrows())
+    indice = costruisci_indice_squadre(df_tutte) if serve_lavoro else {}
     righe = list(pron.iterrows())
     for i, (_, r) in enumerate(righe):
         if progress and i % 3 == 0:
@@ -4635,11 +4652,9 @@ def pagina_storico_pronostici(user):
     # dataframe partite (serve solo se chiedi il ricalcolo dei vecchi)
     df_tutte = carica_partite()
     comp_df_st = carica_competizioni()
-    # mappa partita_id -> codice competizione (una volta, per velocità)
-    comp_per_id = {}
-    if not df_tutte.empty and "id" in df_tutte.columns:
-        for _, mm_ in df_tutte.iterrows():
-            comp_per_id[str(mm_.get("id"))] = mm_.get("competizione")
+    # mappa partita_id -> codice competizione (in cache: NON si ricostruisce a ogni
+    # interazione, era il vero motivo della lentezza a ogni tasto/ricerca)
+    comp_per_id = _mappa_comp_per_id()
     ricalcola_vecchi = st.checkbox(
         "Ricalcola i pronostici vecchi mancanti (più lento)", value=False,
         help="Se attivo, per i pronostici salvati prima dei tre motori ricostruisce "
