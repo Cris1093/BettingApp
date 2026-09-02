@@ -5053,6 +5053,73 @@ def pagina_storico_pronostici(user):
                "Serve tempo e volume per trarne conclusioni.")
 
 
+def pagina_diagnostica(user):
+    """Cronometra le operazioni chiave (query Supabase, elaborazioni) e mostra quali sono
+    le più lente, in una tabella copiabile. Strumento temporaneo per ottimizzare le perf."""
+    import time as _time
+    st.subheader("🔧 Diagnostica prestazioni")
+    st.caption("Misura la durata delle operazioni principali. Premi il pulsante, aspetta, "
+               "poi copia la tabella. NB: la prima esecuzione paga la cache vuota.")
+
+    _cli = get_client()
+    if _cli is None:
+        st.error("Nessun client Supabase.")
+        return
+
+    def _crono(nome, fn):
+        t0 = _time.perf_counter()
+        err = ""
+        n = None
+        try:
+            r = fn()
+            n = (len(r) if hasattr(r, "__len__") else None)
+        except Exception as e:
+            err = str(e)[:60]
+        dt = (_time.perf_counter() - t0) * 1000
+        return {"operazione": nome, "ms": round(dt, 1),
+                "righe": n if n is not None else "-", "errore": err}
+
+    col1, col2 = st.columns(2)
+    svuota = col1.checkbox("Svuota la cache prima (misura 'a freddo')", value=True)
+
+    if col2.button("▶️ Esegui diagnostica", type="primary"):
+        if svuota:
+            st.cache_data.clear()
+        misure = []
+
+        def _count(tab):
+            return _cli.table(tab).select("id", count="exact").limit(1).execute().count
+        misure.append(_crono("COUNT partite (DB)", lambda: _count("partite")))
+        misure.append(_crono("COUNT pronostici (DB)", lambda: _count("pronostici")))
+
+        def _fetch_raw(tab):
+            return _fetch_tutte(_cli, tab, "data", True)
+        misure.append(_crono("FETCH tutte le partite (paginato)", lambda: _fetch_raw("partite")))
+        misure.append(_crono("FETCH tutti i pronostici (paginato)", lambda: _fetch_raw("pronostici")))
+
+        st.cache_data.clear()
+        misure.append(_crono("carica_partite() [freddo]", carica_partite))
+        misure.append(_crono("carica_partite() [caldo]", carica_partite))
+        misure.append(_crono("carica_pronostici() [freddo]", carica_pronostici))
+        misure.append(_crono("carica_pronostici() [caldo]", carica_pronostici))
+        misure.append(_crono("carica_competizioni()", carica_competizioni))
+        misure.append(_crono("_mappa_comp_per_id() [freddo]", _mappa_comp_per_id))
+
+        _df = carica_partite()
+        misure.append(_crono("costruisci_indice_squadre(df)",
+                             lambda: costruisci_indice_squadre(_df)))
+
+        misure.sort(key=lambda m: m["ms"], reverse=True)
+        st.dataframe(pd.DataFrame(misure), use_container_width=True, hide_index=True)
+
+        righe_txt = ["DIAGNOSTICA PRESTAZIONI — " + f"{datetime.now():%Y-%m-%d %H:%M}"]
+        for m in misure:
+            righe_txt.append(f"  {m['ms']:8.1f} ms  | {m['operazione']:42s} "
+                             f"| righe: {m['righe']} {('| ERR: '+m['errore']) if m['errore'] else ''}")
+        st.code("\n".join(righe_txt), language="text")
+        st.caption("Copia il blocco qui sopra e incollalo in chat per l'analisi.")
+
+
 def main():
     user = login_gate()
 
@@ -5061,7 +5128,7 @@ def main():
         pagina = st.radio("Menu", ["📥 Ultimi risultati e quote", "📊 Estrattore risultati",
                                    "🗓️ Estrattore pianificazione", "🔮 Analisi & Pronostico",
                                    "📈 Storico pronostici", "🧪 Backtest",
-                                   "🗄️ Database", "⚙️ Configurazione"])
+                                   "🗄️ Database", "⚙️ Configurazione", "🔧 Diagnostica"])
         if st.button("Esci"):
             st.session_state.pop("user", None)
             st.rerun()
@@ -5080,6 +5147,8 @@ def main():
         pagina_backtest(user)
     elif pagina.startswith("🗄️"):
         pagina_database(user)
+    elif pagina.startswith("🔧"):
+        pagina_diagnostica(user)
     else:
         pagina_configurazione(user)
 
