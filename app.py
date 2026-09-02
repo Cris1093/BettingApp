@@ -4972,6 +4972,14 @@ def pagina_storico_pronostici(user):
                 if ora_new != ora_old:
                     rec["ora"] = ora_new or None
                     cambia = True
+                    # salva l'ora ANCHE nella tabella pronostici (da cui lo storico legge)
+                    try:
+                        _cli = get_client()
+                        if _cli:
+                            _cli.table("pronostici").update(
+                                {"ora": ora_new or None}).eq("partita_id", pid).execute()
+                    except Exception:
+                        pass
             if cambia:
                 recs.append(rec)
             # pronostico Cristiano
