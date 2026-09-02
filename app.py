@@ -3701,6 +3701,24 @@ def _giorni_tra(d1, d2):
         return None
 
 
+def _norm_ora(s):
+    """Normalizza un orario a 'HH:MM'. Accetta '20', '20.30', '20:30', '20,30'.
+    Ritorna '' se vuoto o non valido."""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    s = s.replace(".", ":").replace(",", ":").replace("h", ":").replace("H", ":")
+    import re as _re
+    m = _re.match(r"^(\d{1,2})(?::(\d{1,2}))?$", s)
+    if not m:
+        return ""
+    hh = int(m.group(1))
+    mm = int(m.group(2)) if m.group(2) is not None else 0
+    if hh > 23 or mm > 59:
+        return ""
+    return f"{hh:02d}:{mm:02d}"
+
+
 def _norm_data(d):
     """Normalizza una data (stringa 'YYYY-MM-DD', datetime.date/datetime, o altro) a stringa
     ISO 'YYYY-MM-DD' per confronti omogenei. Evita il TypeError date vs str."""
@@ -4778,7 +4796,9 @@ def pagina_storico_pronostici(user):
         _prob_txt = (f"{float(p1):.0f}/{float(px):.0f}/{float(p2):.0f}" if has_1x2 else "—")
         righe.append({
             "_pid": _txt(r.get("partita_id")),   # id nascosto per il salvataggio (regge il filtro)
-            "Data": r.get("data"), "Casa": r.get("squadra_casa"),
+            "Data": r.get("data"),
+            "Ora": _txt(r.get("ora")) if "ora" in pron.columns else "",
+            "Casa": r.get("squadra_casa"),
             "Trasferta": r.get("squadra_trasferta"), "Risultato": ris,
             "Competizione": _label_da_comp(comp_per_id.get(_txt(r.get("partita_id"))),
                                            comp_df_st) or "",
@@ -4878,6 +4898,8 @@ def pagina_storico_pronostici(user):
         tab, use_container_width=True, hide_index=True, key="editor_storico",
         column_config={
             "_pid": None,
+            "Ora": st.column_config.TextColumn(
+                "Ora", help="Orario partita. Formati: 20, 20.30 o 20:30."),
             "Risultato": st.column_config.TextColumn("Risultato", help="Es. 1-1, 2-0"),
             "Competizione": st.column_config.SelectboxColumn(
                 "Competizione", options=comp_opts,
@@ -4942,6 +4964,13 @@ def pagina_storico_pronostici(user):
                 nuovo = comp_code_by_label.get(comp_lab)
                 if nuovo:
                     rec["competizione"] = nuovo
+                    cambia = True
+            # ora (accetta 20, 20.30, 20:30 -> normalizza a HH:MM)
+            if "Ora" in edit.columns:
+                ora_new = _norm_ora(_txt(erow.get("Ora")))
+                ora_old = _txt(r.get("ora")) if "ora" in pron.columns else ""
+                if ora_new != ora_old:
+                    rec["ora"] = ora_new or None
                     cambia = True
             if cambia:
                 recs.append(rec)
