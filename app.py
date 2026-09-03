@@ -3143,8 +3143,60 @@ def pagina_backtest(user):
             if _err:
                 st.error(f"⚠️ Motivo dei saltati (primo errore): {_err}")
         st.caption("Suggerimento: rigenera ogni tanto (es. dopo aver inserito nuovi risultati) "
-                   "per far crescere il dataset. Quando avrai molte più partite, da qui "
-                   "costruiremo e valideremo il modello ML.")
+                   "per far crescere il dataset.")
+
+        st.divider()
+        st.markdown("**🤖 Addestra il modello ML (esploratore)**")
+        st.caption("Addestra un gradient boosting sugli snapshot e lo valida con split "
+                   "temporale (allena sul passato, testa sul futuro). Con ~600 dati i risultati "
+                   "sono INDICATIVI: serve a capire quali feature contano e se il modello batte "
+                   "il baseline. Non tocca i motori attuali.")
+        if st.button("🧠 Addestra e valida il modello ML"):
+            try:
+                import ml_engine as mle
+            except Exception as e:
+                st.error(f"Libreria ML non disponibile: {e}. Verifica requirements.txt "
+                         "(scikit-learn) e riavvia l'app.")
+                mle = None
+            if mle:
+                _cli = get_client()
+                with st.spinner("Carico gli snapshot e addestro…"):
+                    X, targets, date, nota = mle.carica_dataset(_cli)
+                if X is None:
+                    st.warning(nota)
+                else:
+                    st.caption(f"Dataset: {nota}")
+                    righe_ris = []
+                    # target binari
+                    for name, label in mle.TARGET_BINARI.items():
+                        if name not in targets:
+                            continue
+                        r = mle.addestra_valida_binario(X, targets[name], date)
+                        if "errore" in r:
+                            righe_ris.append(f"{label}: {r['errore']}")
+                            continue
+                        segno = "✅" if r["batte_baseline"] else "❌"
+                        righe_ris.append(
+                            f"{label}: modello {r['acc_modello']}% vs baseline "
+                            f"{r['acc_baseline']}% {segno} (Brier {r['brier']}, "
+                            f"test su {r['n_test']} partite)")
+                        if r.get("top_feature"):
+                            top = ", ".join(f"{f}" for f, _ in r["top_feature"][:5])
+                            righe_ris.append(f"    ↳ feature chiave: {top}")
+                    # target 1X2
+                    if "risultato_1x2" in targets:
+                        r = mle.addestra_valida_1x2(X, targets["risultato_1x2"], date)
+                        if "errore" not in r:
+                            segno = "✅" if r["batte_baseline"] else "❌"
+                            righe_ris.append(
+                                f"1X2 (segno): modello {r['acc_modello']}% vs baseline "
+                                f"{r['acc_baseline']}% (sempre '{r['classe_baseline']}') {segno}")
+                    testo_ml = "RISULTATI MODELLO ML (validazione temporale)\n" + nota + "\n\n" + \
+                        "\n".join(righe_ris)
+                    st.code(testo_ml, language="text")
+                    st.caption("Copia e incolla in chat per l'analisi. ✅ = il modello ML batte "
+                               "il baseline su quel mercato; le 'feature chiave' sono quelle più "
+                               "predittive secondo il modello.")
 
     # --- diario di bordo: andamento dei backtest salvati nel tempo ---
     snap = carica_backtest_snapshot()
