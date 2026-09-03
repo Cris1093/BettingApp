@@ -366,15 +366,15 @@ def partite_per_export(df):
 # =============================================================================
 #  DB PARTITE
 # =============================================================================
-def _fetch_tutte(_cli, tabella, order_col="data", desc=True):
+def _fetch_tutte(_cli, tabella, order_col="data", desc=True, colonne="*"):
     """Scarica TUTTE le righe di una tabella superando il limite di 1000 di Supabase,
-    con paginazione a blocchi. Senza questo, le righe più vecchie sparivano.
-    NON va messa in cache: riceve il client Supabase (non hashabile)."""
+    con paginazione a blocchi. 'colonne' limita le colonne scaricate (molto più veloce se
+    la tabella ha molte colonne pesanti). NON va messa in cache: riceve il client Supabase."""
     righe = []
     step = 1000
     start = 0
     while True:
-        q = _cli.table(tabella).select("*")
+        q = _cli.table(tabella).select(colonne)
         if order_col:
             q = q.order(order_col, desc=desc)
         res = q.range(start, start + step - 1).execute()
@@ -391,7 +391,16 @@ def carica_partite():
     cli = get_client()
     if not cli:
         return pd.DataFrame()
-    df = pd.DataFrame(_fetch_tutte(cli, "partite", "data", True))
+    # scarica SOLO le colonne effettivamente usate (non i timestamp/inserito_da inutili):
+    # riduce il peso trasferito su 11.000+ righe -> molto più veloce.
+    _COLS = ("id,data,competizione,squadra_casa,squadra_trasferta,gol_casa,gol_trasferta,"
+             "qualificatore,tipo_partita,ora,da_compilare,"
+             "quota_iniziale_1,quota_iniziale_x,quota_iniziale_2,"
+             "variazione_quota_1,variazione_quota_x,variazione_quota_2,"
+             "quota_iniziale_over,quota_iniziale_under,variazione_quota_over,variazione_quota_under,"
+             "quota_iniziale_goal,quota_iniziale_nogoal,variazione_quota_goal,variazione_quota_nogoal,"
+             "forma_casa,forma_trasferta,val_casa,val_trasferta,is_target")
+    df = pd.DataFrame(_fetch_tutte(cli, "partite", "data", True, colonne=_COLS))
     if not df.empty and "data" in df:
         df["data"] = pd.to_datetime(df["data"]).dt.date
     return df
@@ -599,7 +608,7 @@ def upsert_pronostico(record):
             _do(rec2)
         except Exception:
             _do({k: v for k, v in record.items() if k not in _opzionali})
-    st.cache_data.clear()
+    _invalida_pronostici()
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -608,6 +617,15 @@ def carica_pronostici():
     if not cli:
         return pd.DataFrame()
     return pd.DataFrame(_fetch_tutte(cli, "pronostici", "creato_il", True))
+
+
+def _invalida_pronostici():
+    """Svuota SOLO la cache dei pronostici, lasciando in cache le 11.000+ partite
+    (che non cambiano quando si salva un pronostico). Evita il ricaricamento da ~6s."""
+    try:
+        carica_pronostici.clear()
+    except Exception:
+        st.cache_data.clear()
 
 
 def completa_risultati_pronostici():
@@ -4085,7 +4103,7 @@ def pagina_analisi(user):
                         "partita_id": _pid_c, "data": str(row.get("data")),
                         "squadra_casa": home, "squadra_trasferta": away,
                         "pron_cristiano": val}).execute()
-                st.cache_data.clear()
+                _invalida_pronostici()
                 st.success("Pronostico Cristiano salvato.")
             except Exception as e:
                 st.warning(f"Salvataggio non riuscito: {e}")
@@ -4393,7 +4411,7 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False, lim
             n += 1
         except Exception:
             continue
-    st.cache_data.clear()
+    _invalida_pronostici()
     return n, da_fare
 
 
