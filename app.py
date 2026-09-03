@@ -2403,15 +2403,15 @@ def pagina_estrattore_pianificazione(user):
                 except Exception as e:
                     st.error(f"Errore: {e}")
 
-    # data della tranche: default OGGI, ma modificabile e MANTENUTA tra un caricamento e
-    # l'altro (come la competizione). Così puoi preparare le partite di domani/dopodomani.
+    # data della tranche: default OGGI la prima volta, poi MANTENUTA e modificabile.
+    # Uso la key per la persistenza (Streamlit ricorda il valore); imposto il default
+    # solo se non esiste ancora, per non bloccare la selezione.
     import datetime as _dt
-    _def_data = st.session_state.get("_pian_data_batch") or _dt.date.today()
+    if "pian_data_batch_widget" not in st.session_state:
+        st.session_state["pian_data_batch_widget"] = _dt.date.today()
     data_batch = st.date_input(
         "Data delle partite (vale per tutta la tranche)",
-        value=_def_data, format="DD/MM/YYYY", key="pian_data_batch_widget")
-    if data_batch:
-        st.session_state["_pian_data_batch"] = data_batch
+        format="DD/MM/YYYY", key="pian_data_batch_widget")
     if not data_batch:
         st.info("Seleziona la data della tranche per continuare.")
         return
