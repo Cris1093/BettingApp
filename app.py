@@ -628,34 +628,48 @@ def _invalida_pronostici():
         st.cache_data.clear()
 
 
-def completa_risultati_pronostici():
+def completa_risultati_pronostici(diagnostica=False):
     """Riempie il risultato reale nei pronostici salvati, abbinandoli alle partite
-    del database (per squadre + data) che ora hanno un risultato. Ritorna n aggiornati."""
+    del database (per squadre + data) che ora hanno un risultato. Ritorna n aggiornati
+    (o un dict diagnostico se diagnostica=True)."""
     cli = get_client()
     if not cli:
-        return 0
+        return {"agg": 0, "motivo": "no client"} if diagnostica else 0
     pron = cli.table("pronostici").select("*").is_("gol_casa", "null").execute().data or []
+    diag = {"pron_in_attesa": len(pron), "agg": 0, "no_match_squadre": 0,
+            "no_risultato": 0, "esempi_falliti": []}
     if not pron:
-        return 0
+        return diag if diagnostica else 0
     part = carica_partite()
     if part.empty:
-        return 0
-    part = part[part["gol_casa"].notna()]
+        return diag if diagnostica else 0
+    part_con_ris = part[part["gol_casa"].notna()]
     agg = 0
     for pr in pron:
-        m = part[(part["squadra_casa"] == pr["squadra_casa"]) &
-                 (part["squadra_trasferta"] == pr["squadra_trasferta"])]
-        if pr.get("data"):
-            m2 = m[m["data"].astype(str) == str(pr["data"])]
-            m = m2 if not m2.empty else m
+        h = str(pr.get("squadra_casa") or "").strip()
+        a = str(pr.get("squadra_trasferta") or "").strip()
+        # abbinamento robusto: confronto normalizzato (spazi/maiuscole)
+        m = part_con_ris[
+            (part_con_ris["squadra_casa"].astype(str).str.strip().str.lower() == h.lower()) &
+            (part_con_ris["squadra_trasferta"].astype(str).str.strip().str.lower() == a.lower())]
         if m.empty:
+            diag["no_match_squadre"] += 1
+            if len(diag["esempi_falliti"]) < 5:
+                diag["esempi_falliti"].append(f"{h} vs {a} (nessuna partita con risultato)")
             continue
+        if pr.get("data"):
+            m2 = m[m["data"].astype(str).str[:10] == str(pr["data"])[:10]]
+            m = m2 if not m2.empty else m
         r = m.sort_values("data").iloc[-1]
-        cli.table("pronostici").update({
-            "gol_casa": int(r["gol_casa"]), "gol_trasferta": int(r["gol_trasferta"]),
-        }).eq("id", pr["id"]).execute()
-        agg += 1
-    return agg
+        try:
+            cli.table("pronostici").update({
+                "gol_casa": int(r["gol_casa"]), "gol_trasferta": int(r["gol_trasferta"]),
+            }).eq("id", pr["id"]).execute()
+            agg += 1
+        except Exception:
+            diag["no_risultato"] += 1
+    diag["agg"] = agg
+    return diag if diagnostica else agg
 
 
 def analisi_quote_bookmaker():
@@ -2296,9 +2310,15 @@ def pagina_estrattore_risultati(user):
         try:
             if updates:
                 aggiorna_partite(updates)
+                # importante: aggiorna_partite ha già svuotato la cache; ora completa
+                # i pronostici leggendo le partite FRESCHE (col nuovo risultato)
+                _sync = completa_risultati_pronostici()
+            else:
+                _sync = 0
+            _invalida_pronostici()
             st.success(f"Agganciati {len(updates)} risultati."
+                       + (f" Aggiornati {_sync} pronostici nello storico." if _sync else "")
                        + (f" Aggiunte {len(nuove)} competizioni in Configurazione." if nuove else ""))
-            st.cache_data.clear()
         except Exception as e:
             st.error(f"Errore: {e}")
 
@@ -4205,9 +4225,14 @@ def pagina_analisi(user):
 
     cca = st.columns(3)
     if cca[0].button("🔄 Aggiorna risultati pronostici"):
-        n = completa_risultati_pronostici()
-        st.success(f"Risultati abbinati a {n} pronostici salvati." if n
-                   else "Nessun pronostico da aggiornare.")
+        _d = completa_risultati_pronostici(diagnostica=True)
+        st.success(f"Risultati abbinati a {_d['agg']} pronostici.")
+        st.caption(f"🔍 In attesa: {_d['pron_in_attesa']} · abbinati: {_d['agg']} · "
+                   f"senza partita corrispondente: {_d['no_match_squadre']}")
+        if _d["esempi_falliti"]:
+            st.warning("Esempi non abbinati (la partita con risultato non è nel DB, o i nomi "
+                       "differiscono):\n\n" + "\n".join(f"• {e}" for e in _d["esempi_falliti"]))
+        _invalida_pronostici()
     if cca[1].button("🎛️ Ottimizza parametri"):
         with st.spinner("Ricerca dei parametri migliori sul database…"):
             opt = analisi.ottimizza_parametri(df)
