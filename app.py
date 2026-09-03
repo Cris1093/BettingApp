@@ -4619,8 +4619,14 @@ def pagina_storico_pronostici(user):
     if cc[0].button("🔄 Ricarica"):
         st.cache_data.clear()
     if cc[1].button("✅ Aggiorna risultati"):
-        n = completa_risultati_pronostici()
-        st.success(f"Risultati abbinati a {n} pronostici." if n else "Nessun nuovo risultato.")
+        _d = completa_risultati_pronostici(diagnostica=True)
+        st.success(f"Risultati abbinati a {_d['agg']} pronostici.")
+        st.caption(f"🔍 In attesa: {_d['pron_in_attesa']} · abbinati: {_d['agg']} · "
+                   f"senza partita corrispondente: {_d['no_match_squadre']}")
+        if _d["esempi_falliti"]:
+            st.warning("Esempi non abbinati (partita con risultato assente nel DB o nomi/date "
+                       "diversi):\n\n" + "\n".join(f"• {e}" for e in _d["esempi_falliti"]))
+        _invalida_pronostici()
     if cc[2].button("⚙️ Popola motore+fusione (mancanti)"):
         _pr = st.progress(0.0, text="Ricalcolo in corso…")
         _pron = carica_pronostici()
