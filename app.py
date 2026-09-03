@@ -1363,25 +1363,24 @@ def pagina_estrattore(user):
             if comp_target:
                 payload["competizione"] = comp_target
                 payload["tipo_partita"] = categoria_o_nd(comp_target, comp_df_estr)
-            # cerca una riga pianificata/pending con le stesse squadre (per non duplicare)
-            part_now = carica_partite()
+            # cerca una riga pianificata/pending con le stesse squadre (per non duplicare):
+            # query MIRATA a Supabase (solo quelle 2 squadre), non scarica tutte le partite
             esistente = None
-            if not part_now.empty:
-                nc, nt = _key(_norm_squadra(team1)), _key(_norm_squadra(team2))
-                cand = part_now[
-                    (part_now["squadra_casa"].map(lambda x: _key(_norm_squadra(x))) == nc) &
-                    (part_now["squadra_trasferta"].map(lambda x: _key(_norm_squadra(x))) == nt)]
-                if not cand.empty:
-                    # riusa SOLO una partita pianificata o una fixture-target ancora
-                    # SENZA risultato — mai una partita storica già giocata (altrimenti
-                    # la nuova sfida erediterebbe data e risultato di quella vecchia).
-                    dac = (cand["da_compilare"] == True) if "da_compilare" in cand \
-                        else pd.Series(False, index=cand.index)
-                    tgt = (cand["is_target"] == True) if "is_target" in cand \
-                        else pd.Series(False, index=cand.index)
-                    senza_ris = cand["gol_casa"].isna() | cand["gol_trasferta"].isna()
-                    riusa = cand[(dac | tgt) & senza_ris]
-                    esistente = riusa.iloc[0] if not riusa.empty else None
+            try:
+                _cli = get_client()
+                _r = (_cli.table("partite")
+                      .select("id,squadra_casa,squadra_trasferta,gol_casa,gol_trasferta,"
+                              "da_compilare,is_target")
+                      .eq("squadra_casa", team1).eq("squadra_trasferta", team2)
+                      .execute())
+                for _cand in (_r.data or []):
+                    senza_ris = _cand.get("gol_casa") is None or _cand.get("gol_trasferta") is None
+                    riusabile = (_cand.get("da_compilare") is True or _cand.get("is_target") is True)
+                    if senza_ris and riusabile:
+                        esistente = _cand
+                        break
+            except Exception:
+                esistente = None
             try:
                 if esistente is not None:
                     upd = dict(payload)
