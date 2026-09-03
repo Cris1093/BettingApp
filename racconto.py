@@ -925,13 +925,9 @@ def _veto_contro_tendenza(mercato, partite_home, partite_away):
     """Applica i blocchi di veto. Ritorna (vietato: bool, motivo: str|None).
     1) opposto nell'ULTIMA partita di una delle due squadre (qualsiasi sede);
     2) opposto >=3 volte nelle ULTIME 5 di una delle due (qualsiasi sede);
-    3) per i SEGNI: sconfitta nell'ultima gara nella sede specifica;
-    4) opposto nell'ULTIMA partita nella SEDE specifica (casa in casa / ospite in trasferta),
-       valido per TUTTI i mercati;
-    5) opposto >=3 volte nelle ULTIME 5 nella SEDE specifica, per TUTTI i mercati."""
+    3) per i SEGNI: sconfitta nell'ultima gara nella sede specifica."""
     ph = partite_home or []
     pa = partite_away or []
-    # sotto-insiemi per sede: casa quando gioca in casa, ospite quando gioca in trasferta
     ph_casa = [p for p in ph if p.get("casa") is True]
     pa_trasf = [p for p in pa if p.get("casa") is False]
 
@@ -952,20 +948,6 @@ def _veto_contro_tendenza(mercato, partite_home, partite_away):
         return True, "sconfitta nell'ultima gara in casa"
     if m in ("2", "X2") and pa_trasf and _opposto_accaduto(m, pa_trasf[0]):
         return True, "sconfitta nell'ultima gara in trasferta"
-
-    # blocco 4: opposto nell'ULTIMA partita nella SEDE specifica (tutti i mercati)
-    if ph_casa and _opposto_accaduto(mercato, ph_casa[0]):
-        return True, "opposto nell'ultima gara in casa (casa)"
-    if pa_trasf and _opposto_accaduto(mercato, pa_trasf[0]):
-        return True, "opposto nell'ultima gara in trasferta (ospite)"
-
-    # blocco 5: opposto >=3 volte nelle ULTIME 5 nella SEDE specifica (tutti i mercati)
-    cnt_casa = sum(1 for p in ph_casa[:5] if _opposto_accaduto(mercato, p))
-    if cnt_casa >= 3:
-        return True, f"opposto {cnt_casa}/5 nelle ultime in casa (casa)"
-    cnt_trasf = sum(1 for p in pa_trasf[:5] if _opposto_accaduto(mercato, p))
-    if cnt_trasf >= 3:
-        return True, f"opposto {cnt_trasf}/5 nelle ultime in trasferta (ospite)"
 
     return False, None
 
