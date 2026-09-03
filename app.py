@@ -414,7 +414,7 @@ def salva_partite(records):
     cli.table("partite").upsert(
         records, on_conflict="data,squadra_casa,squadra_trasferta"
     ).execute()
-    st.cache_data.clear()
+    _invalida_partite()
 
 
 def aggiorna_partite(records):
@@ -624,6 +624,32 @@ def _invalida_pronostici():
     (che non cambiano quando si salva un pronostico). Evita il ricaricamento da ~6s."""
     try:
         carica_pronostici.clear()
+    except Exception:
+        st.cache_data.clear()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _chiavi_partite_esistenti():
+    """Set delle chiavi (data, casa_norm, trasferta_norm) delle partite esistenti, per
+    rilevare i duplicati nell'estrattore. In CACHE e vettoriale: non riscorre 11.000+ righe
+    a ogni ricaricamento (era una causa della lentezza dell'estrattore)."""
+    df = carica_partite()
+    if df.empty:
+        return set()
+    d = df["data"].astype(str)
+    hc = df["squadra_casa"].map(lambda x: _key(_norm_squadra(x)))
+    ta = df["squadra_trasferta"].map(lambda x: _key(_norm_squadra(x)))
+    return set(zip(d, hc, ta))
+
+
+def _invalida_partite():
+    """Svuota la cache delle partite (e la mappa competizioni), senza toccare i pronostici.
+    NON svuota _chiavi_partite_esistenti: la rilevazione duplicati può restare 'tiepida'
+    (si aggiorna da sola col TTL), così il salvataggio nell'estrattore resta veloce.
+    L'upsert con on_conflict impedisce comunque duplicati reali nel DB."""
+    try:
+        carica_partite.clear()
+        _mappa_comp_per_id.clear()
     except Exception:
         st.cache_data.clear()
 
@@ -2338,7 +2364,9 @@ def pagina_estrattore_pianificazione(user):
     # --- inserimento manuale rapido (una partita alla volta) ---
     with st.expander("➕ Aggiungi una partita manualmente"):
         cc = st.columns(2)
-        m_data = cc[0].date_input("Data", value=None, format="DD/MM/YYYY", key="man_data")
+        import datetime as _dt2
+        m_data = cc[0].date_input("Data", value=_dt2.date.today(),
+                                  format="DD/MM/YYYY", key="man_data")
         m_ora = cc[1].text_input("Ora (opzionale)", key="man_ora", placeholder="20:45")
         cc = st.columns(2)
         m_casa = cc[0].text_input("Squadra casa", key="man_casa")
@@ -2375,12 +2403,17 @@ def pagina_estrattore_pianificazione(user):
                 except Exception as e:
                     st.error(f"Errore: {e}")
 
+    # data della tranche: default OGGI, ma modificabile e MANTENUTA tra un caricamento e
+    # l'altro (come la competizione). Così puoi preparare le partite di domani/dopodomani.
+    import datetime as _dt
+    _def_data = st.session_state.get("_pian_data_batch") or _dt.date.today()
     data_batch = st.date_input(
-        "Data delle partite (obbligatoria, vale per tutta la tranche)",
-        value=None, format="DD/MM/YYYY")
+        "Data delle partite (vale per tutta la tranche)",
+        value=_def_data, format="DD/MM/YYYY", key="pian_data_batch_widget")
+    if data_batch:
+        st.session_state["_pian_data_batch"] = data_batch
     if not data_batch:
-        st.info("Seleziona la data della tranche per continuare. "
-                "Tutte le partite caricate insieme avranno questa data.")
+        st.info("Seleziona la data della tranche per continuare.")
         return
 
     testo = st.text_area("Incolla qui la pianificazione", height=260, key="testo_pian")
@@ -2393,15 +2426,11 @@ def pagina_estrattore_pianificazione(user):
         st.warning("Nessuna partita riconosciuta.")
         return
 
-    part = carica_partite()
     comp_df = carica_competizioni()
 
-    # per rilevare i duplicati già presenti (stessa data + squadre)
-    esistenti_key = set()
-    if not part.empty:
-        for _, p in part.iterrows():
-            esistenti_key.add((str(p["data"]), _key(_norm_squadra(p["squadra_casa"])),
-                               _key(_norm_squadra(p["squadra_trasferta"]))))
+    # per rilevare i duplicati già presenti (stessa data + squadre): set in CACHE, costruito
+    # in modo vettoriale (niente iterrows su 11.000+ righe a ogni ricaricamento)
+    esistenti_key = _chiavi_partite_esistenti()
 
     comp_viste, righe, meta = [], [], []
     for f in fixtures:
@@ -2467,7 +2496,6 @@ def pagina_estrattore_pianificazione(user):
             st.success(f"Create {len(records)} partite da compilare per il "
                        f"{data_batch.strftime('%d.%m.%Y')}."
                        + (f" Aggiunte {len(nuove)} competizioni." if nuove else ""))
-            st.cache_data.clear()
         except Exception as e:
             st.error(f"Errore: {e}")
 
