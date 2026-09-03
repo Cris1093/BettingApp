@@ -1110,6 +1110,16 @@ def pagina_estrattore(user):
     st.header("📥 Ultimi risultati e quote")
     st.caption("Incolla i blocchi 'ULTIMI INCONTRI' di 2 squadre alla volta, poi rivedi e salva.")
 
+    # Data della partita da pronosticare: default OGGI, modificabile e mantenuta.
+    # Serve per preparare le partite di domani/dopodomani. Lo storico erediterà questa data.
+    import datetime as _dt_estr
+    if "estr_data_target" not in st.session_state:
+        st.session_state["estr_data_target"] = _dt_estr.date.today()
+    data_target = st.date_input(
+        "Data della partita da pronosticare", format="DD/MM/YYYY", key="estr_data_target",
+        help="Default: oggi. Cambiala per preparare le partite di un giorno successivo. "
+             "La partita da pronosticare verrà salvata con questa data.")
+
     # Prima informazione (opzionale): competizione/tipo della partita da pronosticare
     comp_df_estr = carica_competizioni()
     opz_estr = {"— non specificata —": None}
@@ -1329,6 +1339,7 @@ def pagina_estrattore(user):
         if salva_target and team1 and team2:
             payload = {
                 "is_target": True, "da_compilare": False,
+                "data": str(data_target),   # la data scelta in alto vale sempre
                 "quota_iniziale_1": quote_edit.get("1"), "quota_iniziale_x": quote_edit.get("X"),
                 "quota_iniziale_2": quote_edit.get("2"),
                 "variazione_quota_1": quote_edit.get("1_mod"),
@@ -1378,7 +1389,7 @@ def pagina_estrattore(user):
                     aggiorna_partite([upd])
                 else:
                     rec = dict(payload)
-                    rec["data"] = str(date.today())
+                    rec["data"] = str(data_target)   # data scelta in alto (non più oggi fisso)
                     rec["squadra_casa"], rec["squadra_trasferta"] = team1, team2
                     salva_partite([rec])
                 n_salvate += 1
@@ -1387,7 +1398,7 @@ def pagina_estrattore(user):
                 return
 
         st.success(f"Salvate {n_salvate} righe. Le vedi nella sezione Database.")
-        st.cache_data.clear()
+        _invalida_partite()
         st.session_state["_estr_salvato"] = True
 
     # dopo un salvataggio riuscito: pulsante per inserire subito una nuova partita
