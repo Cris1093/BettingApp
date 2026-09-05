@@ -982,13 +982,19 @@ def parse_risultati(testo):
                     "gol_casa": gc, "gol_trasferta": gt,
                 })
                 i = j + 2
+                # SALTA eventuali numeri ORFANI extra (es. '2 2 2' malformato) che
+                # altrimenti disallineerebbero tutto il resto del programma
+                while i < n and is_int(righe[i]):
+                    i += 1
                 continue
-            # squadre ripetute ma SENZA risultato valido (partita rinviata/orario/malformata):
-            # salta il blocco squadre senza disallineare il resto
+            # squadre ripetute ma senza risultato valido: salta solo il blocco squadre
             i += 4
             continue
-        # riga di intestazione competizione SOLO se seguita da una nazione plausibile
-        # (evita che una riga malformata venga presa per competizione e sfalsi tutto)
+        # numero orfano isolato (residuo di blocchi malformati): saltalo, non è intestazione
+        if is_int(righe[i]):
+            i += 1
+            continue
+        # intestazione competizione: nome + nazione
         comp_corr = righe[i]
         naz_corr = righe[i + 1] if i + 1 < n else None
         i += 2
