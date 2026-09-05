@@ -670,23 +670,39 @@ def completa_risultati_pronostici(diagnostica=False):
     if part.empty:
         return diag if diagnostica else 0
     part_con_ris = part[part["gol_casa"].notna()]
+    from datetime import timedelta as _td
     agg = 0
     for pr in pron:
         h = str(pr.get("squadra_casa") or "").strip()
         a = str(pr.get("squadra_trasferta") or "").strip()
-        # abbinamento robusto: confronto normalizzato (spazi/maiuscole)
         m = part_con_ris[
             (part_con_ris["squadra_casa"].astype(str).str.strip().str.lower() == h.lower()) &
             (part_con_ris["squadra_trasferta"].astype(str).str.strip().str.lower() == a.lower())]
         if m.empty:
             diag["no_match_squadre"] += 1
-            if len(diag["esempi_falliti"]) < 5:
+            if len(diag["esempi_falliti"]) < 8:
                 diag["esempi_falliti"].append(f"{h} vs {a} (nessuna partita con risultato)")
             continue
-        if pr.get("data"):
-            m2 = m[m["data"].astype(str).str[:10] == str(pr["data"])[:10]]
-            m = m2 if not m2.empty else m
-        r = m.sort_values("data").iloc[-1]
+        # LA DATA DEVE COMBACIARE (tolleranza ±1 giorno per fusi orari). MAI agganciare il
+        # risultato di una partita con data diversa: altrimenti una sfida futura eredita il
+        # risultato di una vecchia partita fra le stesse squadre.
+        pron_data = pd.to_datetime(str(pr.get("data"))[:10], errors="coerce") if pr.get("data") else None
+        if pron_data is None:
+            diag["no_match_squadre"] += 1
+            continue
+        mm_date = m.copy()
+        mm_date["_dd"] = pd.to_datetime(mm_date["data"].astype(str).str[:10], errors="coerce")
+        vicine = mm_date[(mm_date["_dd"] - pron_data).abs() <= _td(days=1)]
+        if vicine.empty:
+            # squadre trovate ma nessuna partita nella data giusta -> NON agganciare
+            diag["no_match_squadre"] += 1
+            if len(diag["esempi_falliti"]) < 8:
+                diag["esempi_falliti"].append(
+                    f"{h} vs {a} (risultato non ancora disponibile per il {str(pr.get('data'))[:10]})")
+            continue
+        # tra quelle nella data giusta, prendi la più vicina alla data del pronostico
+        vicine = vicine.assign(_gap=(vicine["_dd"] - pron_data).abs())
+        r = vicine.sort_values("_gap").iloc[0]
         try:
             cli.table("pronostici").update({
                 "gol_casa": int(r["gol_casa"]), "gol_trasferta": int(r["gol_trasferta"]),
