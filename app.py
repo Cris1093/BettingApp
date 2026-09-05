@@ -962,7 +962,7 @@ def parse_risultati(testo):
     comp_corr, naz_corr = None, None
     i = 0
     while i < n:
-        # blocco partita? richiede casa,casa,trasf,trasf ripetute
+        # blocco partita VALIDO: casa,casa,trasf,trasf + (qualif?) + gol,gol
         if i + 5 < n and righe[i] == righe[i + 1] and righe[i + 2] == righe[i + 3]:
             casa = righe[i]
             trasf = righe[i + 2]
@@ -983,7 +983,12 @@ def parse_risultati(testo):
                 })
                 i = j + 2
                 continue
-        # altrimenti è un'intestazione competizione: nome + nazione
+            # squadre ripetute ma SENZA risultato valido (partita rinviata/orario/malformata):
+            # salta il blocco squadre senza disallineare il resto
+            i += 4
+            continue
+        # riga di intestazione competizione SOLO se seguita da una nazione plausibile
+        # (evita che una riga malformata venga presa per competizione e sfalsi tutto)
         comp_corr = righe[i]
         naz_corr = righe[i + 1] if i + 1 < n else None
         i += 2
