@@ -4909,8 +4909,6 @@ def pagina_storico_pronostici(user):
                 "'💾 Salva questo pronostico'.")
         return
 
-    # dataframe partite (serve solo se chiedi il ricalcolo dei vecchi)
-    df_tutte = carica_partite()
     comp_df_st = carica_competizioni()
     # mappa partita_id -> codice competizione (in cache: NON si ricostruisce a ogni
     # interazione, era il vero motivo della lentezza a ogni tasto/ricerca)
@@ -4919,8 +4917,9 @@ def pagina_storico_pronostici(user):
         "Ricalcola i pronostici vecchi mancanti (più lento)", value=False,
         help="Se attivo, per i pronostici salvati prima dei tre motori ricostruisce "
              "l'analisi pre-partita. Lascialo spento per un caricamento istantaneo.")
-    # indice costruito UNA volta (solo se serve il ricalcolo), per non riscansionare tutte
-    # le partite a ogni riga: era la causa dei tempi lunghissimi col ricalcolo attivo
+    # le 11.000+ partite servono SOLO per il ricalcolo dei vecchi: caricale solo allora,
+    # altrimenti lo storico NON deve scaricarle (era la causa dei 6s a ogni interazione)
+    df_tutte = carica_partite() if ricalcola_vecchi else pd.DataFrame()
     _indice_storico = costruisci_indice_squadre(df_tutte) if ricalcola_vecchi else None
 
     def _tre_motori_di(r):
@@ -4981,6 +4980,36 @@ def pagina_storico_pronostici(user):
                 "ev": [0, 0], "cristiano": [0, 0]}
     rank_1x2 = [0, 0, 0]   # [più probabile, medio, meno probabile]
     aperti = 0
+
+    # --- FILTRI applicati PRIMA di costruire la tabella (così il loop pesante gira solo
+    #     sulle righe filtrate: prima filtrava DOPO, ricostruendo tutto a ogni interazione) ---
+    if "data" in pron.columns and not pron.empty:
+        _pd_date = pd.to_datetime(pron["data"], errors="coerce")
+        _dmin, _dmax = _pd_date.min(), _pd_date.max()
+        if pd.notna(_dmin) and pd.notna(_dmax):
+            with st.expander("📅 Filtra per data"):
+                _usa_data = st.checkbox("Attiva filtro per data", value=False,
+                                        key="storico_usa_data")
+                _intv = st.date_input("Intervallo (da – a)",
+                                      value=(_dmin.date(), _dmax.date()),
+                                      min_value=_dmin.date(), max_value=_dmax.date(),
+                                      key="storico_range_data")
+                if _usa_data and isinstance(_intv, (list, tuple)) and len(_intv) == 2:
+                    _dda, _daa = _intv
+                    _mask = (_pd_date.dt.date >= _dda) & (_pd_date.dt.date <= _daa)
+                    pron = pron[_mask].reset_index(drop=True)
+                    st.caption(f"Filtro attivo: dal {_dda:%d/%m/%Y} al {_daa:%d/%m/%Y} "
+                               f"({len(pron)} pronostici).")
+    if not pron.empty and {"squadra_casa", "squadra_trasferta"}.issubset(pron.columns):
+        _cerca_sq = st.text_input("🔎 Filtra per squadra", key="storico_cerca_squadra",
+                                  placeholder="Scrivi parte del nome (casa o trasferta)…")
+        if _cerca_sq and _cerca_sq.strip():
+            _q = _cerca_sq.strip().lower()
+            _m = (pron["squadra_casa"].astype(str).str.lower().str.contains(_q, na=False) |
+                  pron["squadra_trasferta"].astype(str).str.lower().str.contains(_q, na=False))
+            pron = pron[_m].reset_index(drop=True)
+            st.caption(f"Filtro squadra: «{_cerca_sq.strip()}» ({len(pron)} pronostici).")
+
     for _, r in pron.iterrows():
         gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
         tre = _tre_motori_di(r)
@@ -5108,35 +5137,6 @@ def pagina_storico_pronostici(user):
 
     tab = pd.DataFrame(righe)
 
-    # --- filtro per data (calendario) ---
-    if "Data" in tab.columns and not tab.empty:
-        _date = pd.to_datetime(tab["Data"], errors="coerce")
-        dmin = _date.min()
-        dmax = _date.max()
-        if pd.notna(dmin) and pd.notna(dmax):
-            with st.expander("📅 Filtra per data"):
-                usa_filtro = st.checkbox("Attiva filtro per data", value=False,
-                                         key="storico_usa_data")
-                intervallo = st.date_input(
-                    "Intervallo (da – a)", value=(dmin.date(), dmax.date()),
-                    min_value=dmin.date(), max_value=dmax.date(), key="storico_range_data")
-                if usa_filtro and isinstance(intervallo, (list, tuple)) and len(intervallo) == 2:
-                    d_da, d_a = intervallo
-                    mask = (_date.dt.date >= d_da) & (_date.dt.date <= d_a)
-                    tab = tab[mask].reset_index(drop=True)
-                    st.caption(f"Mostro {len(tab)} pronostici dal {d_da:%d/%m/%Y} al {d_a:%d/%m/%Y}.")
-
-    # --- filtro per nome squadra (testo) ---
-    if not tab.empty and {"Casa", "Trasferta"}.issubset(tab.columns):
-        cerca = st.text_input("🔎 Filtra per squadra", key="storico_cerca_squadra",
-                              placeholder="Scrivi parte del nome (casa o trasferta)…")
-        if cerca and cerca.strip():
-            q = cerca.strip().lower()
-            m = (tab["Casa"].astype(str).str.lower().str.contains(q, na=False) |
-                 tab["Trasferta"].astype(str).str.lower().str.contains(q, na=False))
-            tab = tab[m].reset_index(drop=True)
-            st.caption(f"Mostro {len(tab)} pronostici che contengono «{cerca.strip()}».")
-
     st.markdown("**Inserisci risultati e competizioni** direttamente qui (formato risultato: "
                 "`1-1`, `2-0`…). Poi premi Salva. Le colonne dei pronostici non sono modificabili.")
     edit = st.data_editor(
@@ -5192,16 +5192,21 @@ def pagina_storico_pronostici(user):
             rec = {"id": pid}
             cambia = False
             # risultato
-            ris_txt = _txt(erow["Risultato"])
+            ris_txt = _txt(erow["Risultato"]).strip()
             mm = _re.match(r"^\s*(\d+)\s*[-:]\s*(\d+)\s*$", ris_txt)
+            old_gc, old_gt = r.get("gol_casa"), r.get("gol_trasferta")
+            _aveva_ris = not (pd.isna(old_gc) or pd.isna(old_gt))
             if mm:
                 gc_new, gt_new = int(mm.group(1)), int(mm.group(2))
-                old_gc, old_gt = r.get("gol_casa"), r.get("gol_trasferta")
-                if (pd.isna(old_gc) or pd.isna(old_gt) or int(old_gc) != gc_new
-                        or int(old_gt) != gt_new):
+                if (not _aveva_ris or int(old_gc) != gc_new or int(old_gt) != gt_new):
                     rec["gol_casa"] = gc_new
                     rec["gol_trasferta"] = gt_new
                     cambia = True
+            elif _aveva_ris and (ris_txt == "" or ris_txt.lower() in ("in attesa", "-", "—")):
+                # il risultato è stato CANCELLATO (rimesso 'in attesa'): azzera nel DB
+                rec["gol_casa"] = None
+                rec["gol_trasferta"] = None
+                cambia = True
             # competizione
             comp_lab = _txt(erow.get("Competizione"))
             comp_old_lab = _label_da_comp(comp_per_id.get(pid), comp_df_st) or ""
