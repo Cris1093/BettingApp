@@ -918,6 +918,28 @@ def _label_da_comp(val, comp_df):
 # =============================================================================
 #  PARSING "ESTRATTORE RISULTATI" (risultati per competizione, senza data)
 # =============================================================================
+def _nomi_compatibili(a, b):
+    """Due nomi di squadra (già normalizzati con _key) sono 'compatibili' se uno contiene
+    l'altro, o se condividono la parola 'significativa' più lunga. Serve ad abbinare i nomi
+    corti dei programmi ('Breda', 'Verona') con quelli lunghi salvati ('NAC Breda',
+    'Hellas Verona'). Prudente: evita match su parole troppo corte/generiche."""
+    a = (a or "").strip()
+    b = (b or "").strip()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    # uno contiene l'altro come sottostringa di parola
+    if (f" {a} " in f" {b} ") or (f" {b} " in f" {a} ") or a in b.split() or b in a.split():
+        return True
+    # parole in comun i, escludendo termini troppo generici/corti
+    stop = {"fc", "sc", "cf", "ac", "sv", "us", "afc", "cd", "ca", "de", "the", "club",
+            "city", "united", "utd", "real", "atletico", "athletic", "sporting", "1", "2"}
+    wa = {w for w in a.split() if len(w) >= 4 and w not in stop}
+    wb = {w for w in b.split() if len(w) >= 4 and w not in stop}
+    return bool(wa & wb)
+
+
 def _norm_squadra(s):
     """Toglie il codice paese '(Kaz)' e normalizza per il confronto."""
     s = re.sub(r"\(.*?\)", "", _txt(s))
@@ -2251,6 +2273,18 @@ def pagina_estrattore_risultati(user):
         nc, nt = _key(_norm_squadra(r["casa"])), _key(_norm_squadra(r["trasferta"]))
         cand = part[(part["_c"] == nc) & (part["_t"] == nt)] if not part.empty else part
         pending = cand[cand["gol_casa"].isna()] if not cand.empty else cand
+
+        # FALLBACK flessibile: se il match esatto fallisce, prova per parole in comune
+        # ("Breda" ~ "NAC Breda", "Verona" ~ "Hellas Verona", "Waalwijk" ~ "RKC Waalwijk")
+        if (cand.empty or pending.empty) and not part.empty:
+            cand2 = part[part.apply(
+                lambda p: _nomi_compatibili(nc, p["_c"]) and _nomi_compatibili(nt, p["_t"]),
+                axis=1)]
+            pend2 = cand2[cand2["gol_casa"].isna()] if not cand2.empty else cand2
+            if not pend2.empty:
+                cand, pending = cand2, pend2
+            elif not cand2.empty and cand.empty:
+                cand = cand2
 
         mid, applica = None, False
         if not cand.empty and not pending.empty:
