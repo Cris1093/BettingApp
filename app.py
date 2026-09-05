@@ -2326,9 +2326,20 @@ def pagina_estrattore_risultati(user):
                        "devi prima avere quelle partite salvate come fixture (dall'estrattore o "
                        "dalla pianificazione). L'estrattore risultati non crea partite nuove.")
         else:
+            # filtro per squadra, per trovare velocemente un caso specifico
+            _cerca = st.text_input("Cerca una squadra tra le partite in attesa",
+                                   key="dbg_cerca_pending", placeholder="es. Viborg")
+            _pd = _pend_dbg
+            if _cerca and _cerca.strip():
+                q = _cerca.strip().lower()
+                _pd = _pend_dbg[
+                    _pend_dbg["squadra_casa"].astype(str).str.lower().str.contains(q, na=False) |
+                    _pend_dbg["squadra_trasferta"].astype(str).str.lower().str.contains(q, na=False)]
+            st.caption(f"{len(_pd)} partite in attesa" +
+                       (f" che contengono «{_cerca}»" if _cerca else " (mostro le prime 60)"))
             _elenco = [f"{p['squadra_casa']} - {p['squadra_trasferta']} ({p.get('data')})"
-                       for _, p in _pend_dbg.head(40).iterrows()]
-            st.text("\n".join(_elenco))
+                       for _, p in _pd.head(60).iterrows()]
+            st.text("\n".join(_elenco) if _elenco else "Nessuna corrispondenza.")
 
     edit = st.data_editor(
         pd.DataFrame(righe), use_container_width=True, hide_index=True, key="editor_risultati",
