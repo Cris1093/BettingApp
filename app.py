@@ -2314,6 +2314,22 @@ def pagina_estrattore_risultati(user):
     st.markdown(f"**{len(righe)}** risultati letti · "
                 f"{sum(1 for x in righe if x['Stato'].startswith('✅'))} agganciabili")
 
+    # DIAGNOSTICA: quante fixture 'in attesa' ci sono nel DB e come si chiamano?
+    _pend_dbg = part[part["gol_casa"].isna()] if not part.empty else part
+    with st.expander(f"🔍 Diagnostica abbinamento ({len(_pend_dbg)} partite in attesa nel DB)"):
+        st.caption("L'estrattore aggancia i risultati SOLO a partite già presenti nel database "
+                   "e ancora 'in attesa'. Se una partita del programma non si aggancia, o non "
+                   "esiste come fixture in attesa, o ha un nome diverso. Ecco le prime 40 fixture "
+                   "in attesa nel DB (confronta i nomi con quelli del programma):")
+        if _pend_dbg.empty:
+            st.warning("⚠️ NESSUNA partita 'in attesa' nel database! Se vuoi agganciare risultati, "
+                       "devi prima avere quelle partite salvate come fixture (dall'estrattore o "
+                       "dalla pianificazione). L'estrattore risultati non crea partite nuove.")
+        else:
+            _elenco = [f"{p['squadra_casa']} - {p['squadra_trasferta']} ({p.get('data')})"
+                       for _, p in _pend_dbg.head(40).iterrows()]
+            st.text("\n".join(_elenco))
+
     edit = st.data_editor(
         pd.DataFrame(righe), use_container_width=True, hide_index=True, key="editor_risultati",
         disabled=["Competizione", "Categoria", "Casa", "Trasferta", "Risultato", "Stato"],
