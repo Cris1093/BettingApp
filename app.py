@@ -2940,6 +2940,48 @@ def _backtest_una_partita(df, comp_df, riga, recency_decay=None, home_adv=None):
     return ev["prob"], (len(ph), len(pa)), tre
 
 
+def _addestra_predittore_ml():
+    """Addestra (UNA volta, poi in cache) i modelli ML su tutti gli snapshot. Ritorna il
+    pacchetto {modelli, colonne, n_train} o None."""
+    return _addestra_predittore_ml_cache()
+
+
+@st.cache_resource(show_spinner="Addestro il Motore ML sullo storico…")
+def _addestra_predittore_ml_cache():
+    try:
+        import ml_engine as _mle
+    except Exception:
+        return None
+    cli = get_client()
+    if cli is None:
+        return None
+    X, targets, date, nota = _mle.carica_dataset(cli)
+    if X is None or len(X) < 100:
+        return None
+    pacch = _mle.addestra_predittore(X, targets)
+    pacch["n_train"] = len(X)
+    return pacch
+
+
+def _snapshot_partita_corrente(df, home, away, data_partita, competizione):
+    """Costruisce lo snapshot pre-match (le stesse feature del training) per la partita da
+    predire, usando lo storico delle due squadre. Ritorna il dict feature o None."""
+    try:
+        comp_df = carica_competizioni()
+        t_liv = _livello_di(competizione, comp_df) if competizione else None
+        t_cat = categoria_di(competizione, comp_df) if competizione else None
+        t_key = _key(competizione) if competizione else None
+        ph = _partite_squadra_evidenze(df, home, data_partita, None, comp_df, t_liv, t_cat, t_key)
+        pa = _partite_squadra_evidenze(df, away, data_partita, None, comp_df, t_liv, t_cat, t_key)
+        if not ph or not pa:
+            return None
+        ev = evidenze.costruisci_evidenze(ph, pa, odds=None)
+        sig = segnali.calcola_signal(ev)
+        return snapmod.costruisci_snapshot(ph, pa, ev, sig)
+    except Exception:
+        return None
+
+
 def _snapshot_prematch_una(df, comp_df, riga):
     """Costruisce lo snapshot pre-match (feature + target) per UNA partita conclusa,
     usando solo i dati precedenti (walk-forward). Ritorna (features, target, nh, na) o None."""
@@ -4329,6 +4371,41 @@ def pagina_analisi(user):
                              escludi_id=(row.get("id") if not pend.empty else None),
                              competizione=comp_target, recency_decay=an_recency)
     render_racconto_st(racc)
+
+    # --- 🤖 Pronostico del Motore ML (predittore) ---
+    with st.expander("🤖 Pronostico Motore ML (impara dallo storico)"):
+        st.caption("Il modello ML concatena le ~178 feature e, imparando da tutte le partite "
+                   "storiche, stima la probabilità di ogni mercato per QUESTA partita. Ordina dal "
+                   "più probabile ('più sicuro' secondo i dati). Ricordati: è una probabilità, "
+                   "non una certezza.")
+        _pacch = _addestra_predittore_ml()
+        if _pacch is None:
+            st.info("Modello non disponibile: servono snapshot (📸 generali nel Backtest) e la "
+                    "libreria scikit-learn. Genera gli snapshot e riprova.")
+        elif not _pacch.get("modelli"):
+            st.warning("Pochi snapshot per addestrare il modello. Continua a raccogliere partite.")
+        else:
+            try:
+                import ml_engine as _mle
+                # snapshot pre-match della partita corrente (stesse feature del training)
+                feat_ml = _snapshot_partita_corrente(df, home, away, data_partita, comp_target)
+                if feat_ml is None:
+                    st.info("Storico insufficiente per calcolare le feature di questa partita.")
+                else:
+                    pred = _mle.predici_partita(_pacch, feat_ml)
+                    if pred["mercati"]:
+                        best_m, best_p = pred["mercati"][0]
+                        st.markdown(f"**Pronostico più sicuro (ML): {best_m} — {best_p}%**")
+                        # top 6 mercati
+                        for m, p in pred["mercati"][:6]:
+                            st.write(f"• {m}: **{p}%**")
+                        if pred["1x2"]:
+                            _s = pred["1x2"]
+                            st.caption(f"1X2 (ML): 1 = {_s.get('1','?')}% · X = {_s.get('X','?')}% "
+                                       f"· 2 = {_s.get('2','?')}%")
+                    st.caption(f"Modello addestrato su {_pacch.get('n_train','?')} partite storiche.")
+            except Exception as e:
+                st.warning(f"Predizione non riuscita: {e}")
 
     # (motore fuso: la visualizzazione è la sola "Analisi ragionata" sopra;
     #  qui teniamo solo i valori del vecchio motore per il salvataggio storico e la calibrazione)

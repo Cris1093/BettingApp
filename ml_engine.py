@@ -188,3 +188,98 @@ def addestra_valida_1x2(X, y, date, min_train=300, quota_test=0.3):
         "acc_modello": round(acc * 100, 1), "acc_baseline": round(base * 100, 1),
         "batte_baseline": acc > base, "classe_baseline": maggioranza,
     }
+
+
+# ============================================================================
+# PREDITTORE: addestra i modelli su TUTTI gli snapshot e predice ogni partita.
+# I modelli restano in memoria (cache) e predicono all'istante. Ri-addestra quando vuoi.
+# ============================================================================
+# tutti i mercati che il predittore stima (target -> etichetta leggibile)
+TARGET_PRED = {
+    "over15": "Over 1.5", "under15": "Under 1.5",
+    "over25": "Over 2.5", "under25": "Under 2.5",
+    "over35": "Over 3.5", "under35": "Under 3.5",
+    "goal": "Goal", "nogoal": "No Goal",
+    "home_scored": "Casa segna", "away_scored": "Ospite segna",
+}
+
+
+def addestra_predittore(X, targets):
+    """Addestra un modello per OGNI mercato binario su TUTTI i dati (nessuno split: qui
+    vogliamo il modello migliore per predire il futuro, non validarlo). Ritorna un dict
+    {mercato: modello} + le colonne feature usate. Per l'1X2 addestra un modello multiclasse."""
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    modelli = {}
+    colonne = list(X.columns)
+
+    # target binari 'derivati' che non sono direttamente negli snapshot: li calcolo
+    # dai complementari (Under = 1 - Over, No Goal = 1 - Goal)
+    def _serie(nome):
+        if nome in targets:
+            return pd.to_numeric(targets[nome], errors="coerce")
+        base = {"under15": "over15", "under25": "over25", "under35": "over35",
+                "nogoal": "goal"}.get(nome)
+        if base and base in targets:
+            return 1 - pd.to_numeric(targets[base], errors="coerce")
+        return None
+
+    for merc in TARGET_PRED:
+        y = _serie(merc)
+        if y is None:
+            continue
+        mask = y.notna()
+        if mask.sum() < 100 or y[mask].nunique() < 2:
+            continue
+        mdl = HistGradientBoostingClassifier(
+            max_iter=250, learning_rate=0.05, max_leaf_nodes=15,
+            min_samples_leaf=25, l2_regularization=1.0, random_state=42)
+        mdl.fit(X[mask], y[mask].astype(int))
+        modelli[merc] = mdl
+
+    # 1X2 multiclasse
+    if "risultato_1x2" in targets:
+        y = targets["risultato_1x2"].astype(str)
+        mask = y.notna() & (y != "nan") & y.isin(["1", "X", "2"])
+        if mask.sum() >= 100:
+            mdl = HistGradientBoostingClassifier(
+                max_iter=250, learning_rate=0.05, max_leaf_nodes=15,
+                min_samples_leaf=25, l2_regularization=1.0, random_state=42)
+            mdl.fit(X[mask], y[mask])
+            modelli["_1x2"] = mdl
+
+    return {"modelli": modelli, "colonne": colonne}
+
+
+def predici_partita(pacchetto, feature_dict):
+    """Data una partita (feature_dict = snapshot pre-match della partita), ritorna le
+    probabilità ML di ogni mercato, ordinate dalla più alta. pacchetto = output di
+    addestra_predittore."""
+    modelli = pacchetto["modelli"]
+    colonne = pacchetto["colonne"]
+    # costruisci il vettore feature nell'ordine giusto (mancanti -> NaN, il modello li gestisce)
+    x = pd.DataFrame([{c: feature_dict.get(c, np.nan) for c in colonne}])
+    for c in colonne:
+        x[c] = pd.to_numeric(x[c], errors="coerce")
+
+    out = []
+    for merc, mdl in modelli.items():
+        if merc == "_1x2":
+            continue
+        try:
+            p = float(mdl.predict_proba(x)[0, 1]) * 100
+            out.append((TARGET_PRED.get(merc, merc), round(p, 1)))
+        except Exception:
+            continue
+    # 1X2
+    esiti_1x2 = {}
+    if "_1x2" in modelli:
+        try:
+            mdl = modelli["_1x2"]
+            probs = mdl.predict_proba(x)[0]
+            for cls, p in zip(mdl.classes_, probs):
+                esiti_1x2[str(cls)] = round(float(p) * 100, 1)
+        except Exception:
+            pass
+
+    out.sort(key=lambda t: t[1], reverse=True)
+    return {"mercati": out, "1x2": esiti_1x2}
