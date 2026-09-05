@@ -4816,6 +4816,9 @@ def pagina_storico_pronostici(user):
         "Ricalcola i pronostici vecchi mancanti (più lento)", value=False,
         help="Se attivo, per i pronostici salvati prima dei tre motori ricostruisce "
              "l'analisi pre-partita. Lascialo spento per un caricamento istantaneo.")
+    # indice costruito UNA volta (solo se serve il ricalcolo), per non riscansionare tutte
+    # le partite a ogni riga: era la causa dei tempi lunghissimi col ricalcolo attivo
+    _indice_storico = costruisci_indice_squadre(df_tutte) if ricalcola_vecchi else None
 
     def _tre_motori_di(r):
         """{motore:(merc,conf), statistico:(merc,conf), fusione:(merc,conf)} dai valori
@@ -4846,7 +4849,7 @@ def pagina_storico_pronostici(user):
                     comp = _label_da_comp(mrow.iloc[0].get("competizione"), carica_competizioni())
             racc_r = analisi_ragionata(df_tutte, r.get("squadra_casa"), r.get("squadra_trasferta"),
                                        data_partita=r.get("data"), escludi_id=(pid or None),
-                                       competizione=comp)
+                                       competizione=comp, indice=_indice_storico)
             if racc_r:
                 pm = racc_r.get("pronostico") or {}
                 m_mot = (pm.get("mercato") or "", pm.get("score"))
@@ -5149,7 +5152,8 @@ def pagina_storico_pronostici(user):
                                 ).eq("partita_id", rc["id"]).execute()
                             except Exception:
                                 pass
-                st.cache_data.clear()
+                _invalida_partite()
+                _invalida_pronostici()
                 st.success(f"Aggiornate {len(recs)} partite (risultati/competizioni). "
                            "Gli esiti dei pronostici sono aggiornati.")
                 st.rerun()
