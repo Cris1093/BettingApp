@@ -2261,6 +2261,21 @@ def pagina_estrattore_risultati(user):
     part = carica_partite()
     comp_df = carica_competizioni()
 
+    # DIAGNOSTICA PARSER: mostra cosa ha letto davvero dal testo (cerca una squadra)
+    with st.expander("🔬 Cosa ha letto il parser (diagnostica)"):
+        _cerca_par = st.text_input("Cerca nei risultati letti", key="dbg_parser",
+                                   placeholder="es. Viborg")
+        _mostra = risultati
+        if _cerca_par and _cerca_par.strip():
+            q = _cerca_par.strip().lower()
+            _mostra = [r for r in risultati
+                       if q in str(r["casa"]).lower() or q in str(r["trasferta"]).lower()]
+        st.caption(f"{len(_mostra)} risultati" +
+                   (f" con «{_cerca_par}»" if _cerca_par else " (primi 30)"))
+        _righe_par = [f"{r['casa']} - {r['trasferta']} : {r['gol_casa']}-{r['gol_trasferta']}"
+                      for r in _mostra[:30]]
+        st.text("\n".join(_righe_par) if _righe_par else "Nessuno.")
+
     # competizioni presenti nel testo
     comp_viste = []
     for r in risultati:
