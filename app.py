@@ -4877,6 +4877,11 @@ def genera_pronostici_mancanti(df, comp_df, pron, progress=None):
 
 
 def pagina_storico_pronostici(user):
+    import time as _t_st
+    _t0 = _t_st.perf_counter()
+    _tempi = []
+    def _crono(nome):
+        _tempi.append((nome, round((_t_st.perf_counter() - _t0) * 1000)))
     st.header("📈 Storico pronostici")
     st.caption("I pronostici salvati prima della partita, confrontati col risultato reale. "
                "Solo le partite per cui hai salvato il pronostico dall'Analisi.")
@@ -4981,6 +4986,7 @@ def pagina_storico_pronostici(user):
             st.rerun()
 
     pron = carica_pronostici()
+    _crono("carica_pronostici")
     if pron.empty:
         st.info("Nessun pronostico salvato. Vai in 🔮 Analisi & Pronostico e usa "
                 "'💾 Salva questo pronostico'.")
@@ -5087,6 +5093,7 @@ def pagina_storico_pronostici(user):
             pron = pron[_m].reset_index(drop=True)
             st.caption(f"Filtro squadra: «{_cerca_sq.strip()}» ({len(pron)} pronostici).")
 
+    _crono("prima del loop tabella")
     for _, r in pron.iterrows():
         gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
         tre = _tre_motori_di(r)
@@ -5213,6 +5220,14 @@ def pagina_storico_pronostici(user):
     comp_opts = [comp_opts[0]] + sorted(comp_opts[1:], key=lambda x: x.lower())
 
     tab = pd.DataFrame(righe)
+    _crono("tabella costruita")
+
+    # cronometro diagnostico: mostra dove va il tempo (temporaneo)
+    with st.expander("⏱️ Tempi di caricamento (diagnostica)"):
+        _prec = 0
+        for _nome, _ms in _tempi:
+            st.text(f"  {_ms:6d} ms totali  (+{_ms-_prec} ms)  {_nome}")
+            _prec = _ms
 
     st.markdown("**Inserisci risultati e competizioni** direttamente qui (formato risultato: "
                 "`1-1`, `2-0`…). Poi premi Salva. Le colonne dei pronostici non sono modificabili.")
