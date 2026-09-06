@@ -4886,6 +4886,15 @@ def pagina_storico_pronostici(user):
     st.caption("I pronostici salvati prima della partita, confrontati col risultato reale. "
                "Solo le partite per cui hai salvato il pronostico dall'Analisi.")
 
+    # mostra i tempi dell'ULTIMO caricamento (salvati in sessione al giro precedente)
+    _tempi_prec = st.session_state.get("_storico_tempi")
+    if _tempi_prec:
+        with st.expander("⏱️ Tempi ultimo caricamento (diagnostica)", expanded=True):
+            _prec = 0
+            for _nome, _ms in _tempi_prec:
+                st.text(f"  {_ms:6d} ms  (+{_ms-_prec} ms)  {_nome}")
+                _prec = _ms
+
     if not supabase_pronto():
         st.warning("Supabase non configurato.")
         return
@@ -5221,13 +5230,7 @@ def pagina_storico_pronostici(user):
 
     tab = pd.DataFrame(righe)
     _crono("tabella costruita")
-
-    # cronometro diagnostico: mostra dove va il tempo (temporaneo)
-    with st.expander("⏱️ Tempi di caricamento (diagnostica)"):
-        _prec = 0
-        for _nome, _ms in _tempi:
-            st.text(f"  {_ms:6d} ms totali  (+{_ms-_prec} ms)  {_nome}")
-            _prec = _ms
+    st.session_state["_storico_tempi"] = list(_tempi)   # visibili in cima al prossimo giro
 
     st.markdown("**Inserisci risultati e competizioni** direttamente qui (formato risultato: "
                 "`1-1`, `2-0`…). Poi premi Salva. Le colonne dei pronostici non sono modificabili.")
