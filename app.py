@@ -2977,7 +2977,7 @@ def _snapshot_partita_corrente(df, home, away, data_partita, competizione):
             return None
         ev = evidenze.costruisci_evidenze(ph, pa, odds=None)
         sig = segnali.calcola_signal(ev)
-        return snapmod.costruisci_snapshot(ph, pa, ev, sig)
+        return snapmod.costruisci_snapshot(ph, pa, ev, sig, categoria=t_cat)
     except Exception:
         return None
 
@@ -3003,7 +3003,7 @@ def _snapshot_prematch_una(df, comp_df, riga):
     hcap_a = _handicap_livello(pa, t_liv)
     ev = evidenze.costruisci_evidenze(ph, pa, odds=None, hcap_home=hcap_h, hcap_away=hcap_a)
     sig = segnali.calcola_signal(ev)
-    feat = snapmod.costruisci_snapshot(ph, pa, ev, sig)
+    feat = snapmod.costruisci_snapshot(ph, pa, ev, sig, categoria=t_cat)
     tgt = snapmod.costruisci_target(gc, gt)
     return feat, tgt, len(ph), len(pa)
 

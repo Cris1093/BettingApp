@@ -177,12 +177,30 @@ def _feat_squadra(partite, venue, prefix):
 # ---------------------------------------------------------------------------
 # costruzione completa
 # ---------------------------------------------------------------------------
-def costruisci_snapshot(partite_home, partite_away, ev=None, sig=None):
+def costruisci_snapshot(partite_home, partite_away, ev=None, sig=None, categoria=None):
     """Snapshot RICCO pre-match. Input: liste walk-forward (partite precedenti), dalla più
-    recente. ev/sig opzionali per le probabilità/segnale del motore attuale."""
+    recente. ev/sig opzionali per le probabilità/segnale del motore attuale.
+    categoria = tipo della partita corrente (Amichevole/Coppa/Campionato/...): entra come
+    feature esplicita (flag 0/1 per tipo), così il modello può concatenarla con le altre."""
     feat = {}
     feat.update(_feat_squadra(partite_home, "casa", "home"))
     feat.update(_feat_squadra(partite_away, "trasf", "away"))
+
+    # ---- tipologia della partita corrente (feature esplicita, flag 0/1 per categoria) ----
+    _cat = (categoria or "").strip().lower()
+    feat["is_amichevole"] = 1 if "amichev" in _cat else 0
+    feat["is_coppa"] = 1 if "coppa" in _cat or "cup" in _cat else 0
+    feat["is_campionato"] = 1 if ("campionat" in _cat or "league" in _cat
+                                  or "liga" in _cat or "serie" in _cat) else 0
+    feat["is_playoff"] = 1 if "playoff" in _cat or "play off" in _cat or "play-off" in _cat else 0
+    feat["is_torneo_sec"] = 1 if ("secondar" in _cat or "torneo" in _cat) else 0
+    # peso medio delle competizioni giocate di recente dalle due squadre (proxy del "livello"
+    # medio del loro calendario): amichevoli abbassano, coppe/campionati alzano
+    def _peso_medio(part):
+        pesi = [p.get("peso") for p in (part or [])[:10] if p.get("peso") is not None]
+        return round(sum(pesi) / len(pesi), 3) if pesi else None
+    feat["home_peso_medio"] = _peso_medio(partite_home)
+    feat["away_peso_medio"] = _peso_medio(partite_away)
 
     # ---- incroci attacco/difesa (i più informativi per i gol) ----
     hgf = _media_gf(partite_home); hgs = _media_gs(partite_home)
