@@ -5013,13 +5013,14 @@ def pagina_storico_pronostici(user):
     # altrimenti lo storico NON deve scaricarle (era la causa dei 6s a ogni interazione)
     df_tutte = carica_partite() if ricalcola_vecchi else pd.DataFrame()
     _indice_storico = costruisci_indice_squadre(df_tutte) if ricalcola_vecchi else None
+    _cols_tre = set(pron.columns)
 
     def _tre_motori_di(r):
         """{motore:(merc,conf), statistico:(merc,conf), fusione:(merc,conf)} dai valori
-        SALVATI (istantaneo). Ricalcola solo se richiesto e se mancano."""
+        SALVATI (istantaneo). r è un dict. Ricalcola solo se richiesto e se mancano."""
         def _get(col_m, col_c):
-            m = _txt(r.get(col_m)) if col_m in pron.columns else ""
-            c = r.get(col_c) if col_c in pron.columns else None
+            m = _txt(r.get(col_m))
+            c = r.get(col_c)
             c = int(c) if c is not None and not pd.isna(c) else None
             return (m, c)
         mot = _get("merc_motore", "conf_motore")
@@ -5027,7 +5028,7 @@ def pagina_storico_pronostici(user):
         fus = _get("merc_fusione", "conf_fusione")
         sstat = _get("merc_solo_stat", "conf_solo_stat")
         # fallback leggero: se manca merc_motore usa il mercato_ragionato salvato
-        if not mot[0] and "mercato_ragionato" in pron.columns:
+        if not mot[0] and "mercato_ragionato" in _cols_tre:
             mr = _txt(r.get("mercato_ragionato"))
             sc = r.get("score_ragionato")
             mot = (mr, int(sc) if sc is not None and not pd.isna(sc) else None)
@@ -5103,17 +5104,19 @@ def pagina_storico_pronostici(user):
             st.caption(f"Filtro squadra: «{_cerca_sq.strip()}» ({len(pron)} pronostici).")
 
     _crono("prima del loop tabella")
-    for _, r in pron.iterrows():
+    _cols = set(pron.columns)   # calcolato UNA volta (non a ogni riga)
+    _records = pron.to_dict("records")   # itertuples/dict: molto più veloce di iterrows()
+    for r in _records:
         gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
         tre = _tre_motori_di(r)
-        pron_cri = _txt(r.get("pron_cristiano")) if "pron_cristiano" in pron.columns else ""
-        merc_ev = _txt(r.get("merc_ev")) if "merc_ev" in pron.columns else ""
-        val_ev = r.get("val_ev") if "val_ev" in pron.columns else None
-        quota_ev = r.get("quota_ev") if "quota_ev" in pron.columns else None
+        pron_cri = _txt(r.get("pron_cristiano")) if "pron_cristiano" in _cols else ""
+        merc_ev = _txt(r.get("merc_ev")) if "merc_ev" in _cols else ""
+        val_ev = r.get("val_ev") if "val_ev" in _cols else None
+        quota_ev = r.get("quota_ev") if "quota_ev" in _cols else None
         # probabilità 1X2 del motore (salvate)
-        p1 = r.get("prob_1") if "prob_1" in pron.columns else None
-        px = r.get("prob_x") if "prob_x" in pron.columns else None
-        p2 = r.get("prob_2") if "prob_2" in pron.columns else None
+        p1 = r.get("prob_1") if "prob_1" in _cols else None
+        px = r.get("prob_x") if "prob_x" in _cols else None
+        p2 = r.get("prob_2") if "prob_2" in _cols else None
         has_1x2 = all(v is not None and not pd.isna(v) for v in (p1, px, p2))
         cell = {}
         if gc is not None and gt is not None and not (pd.isna(gc) or pd.isna(gt)):
