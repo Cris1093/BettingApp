@@ -4284,7 +4284,12 @@ def pagina_analisi(user):
     if not pend.empty:
         opz = {f'{r["squadra_casa"]} - {r["squadra_trasferta"]}  ({r["data"]})': r
                for _, r in pend.iterrows()}
-        scelta = st.selectbox("Partita da analizzare (in attesa di risultato)", list(opz.keys()))
+        _chiavi = list(opz.keys())
+        # preselezione arrivata dalla Console partite (pulsante "→ Pronostico")
+        _presel = st.session_state.pop("_console_vai_a", None)
+        _idx = _chiavi.index(_presel) if _presel in opz else 0
+        scelta = st.selectbox("Partita da analizzare (in attesa di risultato)", _chiavi,
+                              index=_idx)
         row = opz[scelta]
         home, away = row["squadra_casa"], row["squadra_trasferta"]
         odds = _eff_odds(row)
@@ -5498,15 +5503,109 @@ def pagina_diagnostica(user):
         st.caption("Copia il blocco qui sopra e incollalo in chat per l'analisi.")
 
 
+def pagina_console_partite(user):
+    """Console partite: seleziona una data e vedi tutte le partite pianificate/concluse di
+    quel giorno, con risultato e storico disponibile per ogni squadra (casa+trasferta).
+    Tappa 1: visualizzazione. Le tappe successive (validazione campionati) arrivano dopo."""
+    import datetime as _dt_c
+    st.header("🎛️ Console partite")
+    st.caption("Seleziona una data e vedi tutte le partite di quel giorno, il risultato e "
+               "quanto storico hai per ogni squadra. Da qui controllerai i dati a colpo d'occhio.")
+
+    if not supabase_pronto():
+        st.warning("Supabase non configurato.")
+        return
+
+    df = carica_partite()
+    if df.empty:
+        st.info("Nessuna partita nel database.")
+        return
+
+    # selettore data (default oggi, mantenuto)
+    if "console_data" not in st.session_state:
+        st.session_state["console_data"] = _dt_c.date.today()
+    data_sel = st.date_input("Data", format="DD/MM/YYYY", key="console_data")
+    if not data_sel:
+        return
+
+    comp_df = carica_competizioni()
+
+    # partite della data selezionata
+    _dd = pd.to_datetime(df["data"], errors="coerce").dt.date
+    giorno = df[_dd == data_sel].copy()
+    if giorno.empty:
+        st.info(f"Nessuna partita salvata per il {data_sel:%d/%m/%Y}. "
+                "Inseriscile dall'Estrattore pianificazione.")
+        return
+
+    # conteggio storico per squadra: quante partite CONCLUSE ha ciascuna nel DB
+    # (indice veloce, costruito una volta)
+    concl = df[df["gol_casa"].notna() & df["gol_trasferta"].notna()]
+    conteggio = {}
+    if not concl.empty:
+        for s in pd.concat([concl["squadra_casa"], concl["squadra_trasferta"]]):
+            k = _key(_norm_squadra(s))
+            conteggio[k] = conteggio.get(k, 0) + 1
+
+    def _storico(sq):
+        return conteggio.get(_key(_norm_squadra(sq)), 0)
+
+    # costruisci la tabella della console
+    righe = []
+    for _, p in giorno.iterrows():
+        gc, gt = p.get("gol_casa"), p.get("gol_trasferta")
+        ris = (f"{int(gc)}-{int(gt)}" if (_num_ok(gc) and _num_ok(gt)) else "in attesa")
+        nh = _storico(p.get("squadra_casa"))
+        na = _storico(p.get("squadra_trasferta"))
+        righe.append({
+            "Ora": _txt(p.get("ora")),
+            "Casa": p.get("squadra_casa"),
+            "Trasferta": p.get("squadra_trasferta"),
+            "Risultato": ris,
+            "Storico": f"{nh}+{na}",
+            "Competizione": _label_da_comp(p.get("competizione"), comp_df) or "—",
+        })
+    tab = pd.DataFrame(righe)
+    st.markdown(f"**{len(tab)} partite** il {data_sel:%d/%m/%Y}")
+    st.dataframe(tab, use_container_width=True, hide_index=True)
+
+    # --- pulsanti "→ Pronostico" per ogni partita in attesa ---
+    st.markdown("**Vai al pronostico di una partita:**")
+    st.caption("Solo le partite in attesa di risultato hanno il pronostico. Cliccando, "
+               "vieni portato all'Analisi con la partita già selezionata.")
+    for _, p in giorno.iterrows():
+        gc, gt = p.get("gol_casa"), p.get("gol_trasferta")
+        if _num_ok(gc) and _num_ok(gt):
+            continue   # già giocata: niente pronostico
+        h, a, dt = p.get("squadra_casa"), p.get("squadra_trasferta"), p.get("data")
+        etich = f'{h} - {a}  ({dt})'
+        if st.button(f"🎯 {h} - {a}", key=f"vai_{p.get('id')}"):
+            st.session_state["_console_vai_a"] = etich
+            st.session_state["_vai_a_analisi"] = True
+            st.rerun()
+
+    # avviso sulle squadre con poco storico
+    poche = [r for r in righe if int(r["Storico"].split("+")[0]) < 8
+             or int(r["Storico"].split("+")[1]) < 8]
+    if poche:
+        st.caption(f"⚠️ {len(poche)} partite hanno una squadra con meno di 8 partite di storico. "
+                   "Per quelle conviene inserire le ultime 15 da 'Ultimi risultati e quote'.")
+
+
 def main():
     user = login_gate()
 
     with st.sidebar:
         st.markdown(f"**Utente:** {user['username']}  \n_ruolo: {user['ruolo']}_")
-        pagina = st.radio("Menu", ["📥 Ultimi risultati e quote", "📊 Estrattore risultati",
-                                   "🗓️ Estrattore pianificazione", "🔮 Analisi & Pronostico",
-                                   "📈 Storico pronostici", "🧪 Backtest",
-                                   "🗄️ Database", "⚙️ Configurazione", "🔧 Diagnostica"])
+        _voci = ["📥 Ultimi risultati e quote", "📊 Estrattore risultati",
+                 "🗓️ Estrattore pianificazione", "🎛️ Console partite",
+                 "🔮 Analisi & Pronostico",
+                 "📈 Storico pronostici", "🧪 Backtest",
+                 "🗄️ Database", "⚙️ Configurazione", "🔧 Diagnostica"]
+        # navigazione forzata dalla Console ("→ Pronostico"): porta all'Analisi
+        if st.session_state.pop("_vai_a_analisi", False):
+            st.session_state["_menu_scelta"] = "🔮 Analisi & Pronostico"
+        pagina = st.radio("Menu", _voci, key="_menu_scelta")
         if st.button("Esci"):
             st.session_state.pop("user", None)
             st.rerun()
@@ -5517,6 +5616,8 @@ def main():
         pagina_estrattore_risultati(user)
     elif pagina.startswith("🗓️"):
         pagina_estrattore_pianificazione(user)
+    elif pagina.startswith("🎛️"):
+        pagina_console_partite(user)
     elif pagina.startswith("🔮"):
         pagina_analisi(user)
     elif pagina.startswith("📈"):
