@@ -4285,9 +4285,14 @@ def pagina_analisi(user):
         opz = {f'{r["squadra_casa"]} - {r["squadra_trasferta"]}  ({r["data"]})': r
                for _, r in pend.iterrows()}
         _chiavi = list(opz.keys())
-        # preselezione arrivata dalla Console partite (pulsante "→ Pronostico")
-        _presel = st.session_state.pop("_console_vai_a", None)
-        _idx = _chiavi.index(_presel) if _presel in opz else 0
+        # preselezione arrivata dalla Console partite (per id partita, robusto)
+        _presel_id = st.session_state.pop("_console_vai_a_id", None)
+        _idx = 0
+        if _presel_id:
+            for _ii, (_k, _rr) in enumerate(opz.items()):
+                if str(_rr.get("id")) == str(_presel_id):
+                    _idx = _ii
+                    break
         scelta = st.selectbox("Partita da analizzare (in attesa di risultato)", _chiavi,
                               index=_idx)
         row = opz[scelta]
@@ -5569,20 +5574,24 @@ def pagina_console_partite(user):
     st.markdown(f"**{len(tab)} partite** il {data_sel:%d/%m/%Y}")
     st.dataframe(tab, use_container_width=True, hide_index=True)
 
-    # --- pulsanti "→ Pronostico" per ogni partita in attesa ---
-    st.markdown("**Vai al pronostico di una partita:**")
-    st.caption("Solo le partite in attesa di risultato hanno il pronostico. Cliccando, "
-               "vieni portato all'Analisi con la partita già selezionata.")
-    for _, p in giorno.iterrows():
-        gc, gt = p.get("gol_casa"), p.get("gol_trasferta")
-        if _num_ok(gc) and _num_ok(gt):
-            continue   # già giocata: niente pronostico
-        h, a, dt = p.get("squadra_casa"), p.get("squadra_trasferta"), p.get("data")
-        etich = f'{h} - {a}  ({dt})'
-        if st.button(f"🎯 {h} - {a}", key=f"vai_{p.get('id')}"):
-            st.session_state["_console_vai_a"] = etich
-            st.session_state["_vai_a_analisi"] = True
-            st.rerun()
+    # --- pulsanti "→ Pronostico" per ogni partita IN ATTESA ---
+    st.divider()
+    st.markdown("### 🎯 Vai al pronostico")
+    in_attesa = [p for _, p in giorno.iterrows()
+                 if not (_num_ok(p.get("gol_casa")) and _num_ok(p.get("gol_trasferta")))]
+    if not in_attesa:
+        st.info("Tutte le partite di questa data hanno già un risultato: nessun pronostico "
+                "da mostrare (i pronostici valgono solo prima della partita).")
+    else:
+        st.caption(f"{len(in_attesa)} partite in attesa. Clicca per aprire l'analisi con la "
+                   "partita già selezionata:")
+        for _i, p in enumerate(in_attesa):
+            h, a, dt = p.get("squadra_casa"), p.get("squadra_trasferta"), p.get("data")
+            if st.button(f"🎯 {h} — {a}", key=f"console_vai_{_i}_{p.get('id')}",
+                         use_container_width=True):
+                st.session_state["_console_vai_a_id"] = str(p.get("id"))
+                st.session_state["_vai_a_analisi"] = True
+                st.rerun()
 
     # avviso sulle squadre con poco storico
     poche = [r for r in righe if int(r["Storico"].split("+")[0]) < 8
