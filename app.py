@@ -483,6 +483,22 @@ def elimina_competizione(cid):
     st.cache_data.clear()
 
 
+def _salva_competizione_validata(rec):
+    """Salva/aggiorna una competizione col flag 'validato'. Se la colonna 'validato' non
+    esiste ancora nel DB, salva senza (fallback resiliente)."""
+    cli = get_client()
+    if not cli:
+        raise RuntimeError("Supabase non configurato.")
+    if not rec.get("id"):
+        rec["id"] = str(uuid.uuid4())
+    try:
+        cli.table("competizioni").upsert(rec).execute()
+    except Exception:
+        rec2 = {k: v for k, v in rec.items() if k != "validato"}
+        cli.table("competizioni").upsert(rec2).execute()
+    st.cache_data.clear()
+
+
 # --- Calibrazione & pronostici ---
 def carica_calibrazione():
     """Ritorna {'over25': {'xs':[...], 'ys':[...]}, 'goal': {...}} se presenti."""
@@ -5573,6 +5589,76 @@ def pagina_console_partite(user):
     tab = pd.DataFrame(righe)
     st.markdown(f"**{len(tab)} partite** il {data_sel:%d/%m/%Y}")
     st.dataframe(tab, use_container_width=True, hide_index=True)
+
+    # === VALIDAZIONE CAMPIONATI (tappa 2) ===
+    st.divider()
+    st.markdown("### ✅ Validazione campionati")
+    st.caption("I campionati delle partite di oggi non ancora validati. Controlla i dati "
+               "(nome, nazione, nome corto, categoria, livello) e premi «Validazione "
+               "definitiva»: non ricompariranno più qui.")
+    # competizioni presenti nelle partite del giorno
+    comps_giorno = [c for c in giorno["competizione"].dropna().unique() if _txt(c)]
+    # stato validazione per ognuna
+    _val_col = "validato" in comp_df.columns if not comp_df.empty else False
+    da_validare = []
+    for code in comps_giorno:
+        riga_comp = None
+        if not comp_df.empty:
+            k = _key(code)
+            for _, c in comp_df.iterrows():
+                if k in _chiavi_competizione(c):
+                    riga_comp = c
+                    break
+        gia_validato = bool(riga_comp is not None and _val_col and riga_comp.get("validato"))
+        if not gia_validato:
+            da_validare.append((code, riga_comp))
+
+    if not da_validare:
+        st.success("Tutti i campionati di questa data sono già validati. 👍")
+    else:
+        st.caption(f"{len(da_validare)} campionati da validare:")
+        _cats = ["Campionato", "Coppa nazionale", "Coppa internazionale", "Playoff",
+                 "Torneo secondario", "Amichevole", "Altro", "Non assegnata"]
+        for _idx, (code, riga_comp) in enumerate(da_validare):
+            with st.container(border=True):
+                # valori attuali (se il campionato è già a DB) o proposti
+                nome_l = _txt(riga_comp.get("nome_lungo")) if riga_comp is not None else _txt(code)
+                naz = _txt(riga_comp.get("nazione")) if riga_comp is not None else ""
+                nome_c = _txt(riga_comp.get("nome_corto")) if riga_comp is not None else ""
+                cat = _txt(riga_comp.get("categoria")) if riga_comp is not None else "Non assegnata"
+                liv = riga_comp.get("livello") if riga_comp is not None else None
+                cid = riga_comp.get("id") if riga_comp is not None else None
+
+                st.markdown(f"**{nome_l or code}**")
+                c1, c2 = st.columns(2)
+                v_nome = c1.text_input("Nome lungo", value=nome_l, key=f"vnome_{_idx}")
+                v_naz = c2.text_input("Nazione", value=naz, key=f"vnaz_{_idx}")
+                c3, c4, c5 = st.columns(3)
+                v_corto = c3.text_input("Nome corto", value=nome_c, key=f"vcorto_{_idx}")
+                v_cat = c4.selectbox("Categoria", _cats,
+                                     index=_cats.index(cat) if cat in _cats else len(_cats) - 1,
+                                     key=f"vcat_{_idx}")
+                v_liv = c5.number_input("Livello", min_value=0, max_value=10,
+                                        value=int(liv) if liv is not None and not pd.isna(liv) else 1,
+                                        key=f"vliv_{_idx}")
+                if st.button("✅ Validazione definitiva", key=f"vbtn_{_idx}",
+                             type="primary"):
+                    try:
+                        rec = {
+                            "nome_lungo": v_nome.strip() or code,
+                            "nazione": v_naz.strip() or None,
+                            "nome_corto": v_corto.strip() or None,
+                            "categoria": v_cat,
+                            "livello": int(v_liv),
+                            "validato": True,
+                        }
+                        if cid:
+                            rec["id"] = cid
+                        _salva_competizione_validata(rec)
+                        st.success(f"«{v_nome or code}» validato.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Errore: {e}")
 
     # --- pulsanti "→ Pronostico" per ogni partita IN ATTESA ---
     st.divider()
