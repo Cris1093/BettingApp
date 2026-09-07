@@ -616,7 +616,17 @@ def carica_pronostici():
     cli = get_client()
     if not cli:
         return pd.DataFrame()
-    return pd.DataFrame(_fetch_tutte(cli, "pronostici", "creato_il", True))
+    # scarica solo le colonne usate dallo storico (esclude scheda_json/riepilogo, testi
+    # pesanti che rallentano il caricamento su ~800 righe)
+    _COLS = ("id,partita_id,data,ora,squadra_casa,squadra_trasferta,competizione,"
+             "gol_casa,gol_trasferta,prob_1,prob_x,prob_2,"
+             "merc_motore,conf_motore,merc_statistico,conf_statistico,"
+             "merc_fusione,conf_fusione,merc_solo_stat,conf_solo_stat,"
+             "mercato_ragionato,score_ragionato,merc_ev,val_ev,quota_ev,pron_cristiano")
+    try:
+        return pd.DataFrame(_fetch_tutte(cli, "pronostici", "creato_il", True, colonne=_COLS))
+    except Exception:
+        return pd.DataFrame(_fetch_tutte(cli, "pronostici", "creato_il", True))
 
 
 def _invalida_pronostici():
@@ -903,16 +913,35 @@ def categoria_o_nd(codice_o_label, comp_df):
 
 
 def _label_da_comp(val, comp_df):
-    """Traduce il valore salvato (es. codice '2L') nel nome leggibile dell'anagrafica
-    ('Vtora Liga | Bulgaria'). Se non è in anagrafica, restituisce il valore così com'è."""
+    """Traduce il valore salvato nel nome leggibile. Usa una mappa in CACHE (veloce);
+    era la causa dei ~56s nello storico (prima iterava tutte le competizioni per ogni riga)."""
     v = _txt(val)
-    if not v or comp_df is None or comp_df.empty:
+    if not v:
         return v
-    k = _key(v)
-    for _, c in comp_df.iterrows():
-        if k in _chiavi_competizione(c):
-            return label_competizione(c.get("nome_lungo"), c.get("nazione")) or v
+    try:
+        mp = _mappa_label_competizioni()
+        lab = mp.get(_key(v))
+        if lab:
+            return lab
+    except Exception:
+        pass
     return v
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _mappa_label_competizioni():
+    """Mappa {chiave -> etichetta} costruita UNA volta (non per ogni riga)."""
+    comp_df = carica_competizioni()
+    if comp_df is None or comp_df.empty:
+        return {}
+    m = {}
+    for _, c in comp_df.iterrows():
+        lab = label_competizione(c.get("nome_lungo"), c.get("nazione"))
+        if not lab:
+            continue
+        for k in _chiavi_competizione(c):
+            m[k] = lab
+    return m
 
 
 # =============================================================================
