@@ -1555,14 +1555,18 @@ def pagina_estrattore(user):
             try:
                 _cli = get_client()
                 _r = (_cli.table("partite")
-                      .select("id,squadra_casa,squadra_trasferta,gol_casa,gol_trasferta,"
+                      .select("id,data,squadra_casa,squadra_trasferta,gol_casa,gol_trasferta,"
                               "da_compilare,is_target,competizione")
                       .eq("squadra_casa", team1).eq("squadra_trasferta", team2)
                       .execute())
+                _data_sel = str(data_target)[:10]
                 for _cand in (_r.data or []):
                     senza_ris = _cand.get("gol_casa") is None or _cand.get("gol_trasferta") is None
                     riusabile = (_cand.get("da_compilare") is True or _cand.get("is_target") is True)
-                    if senza_ris and riusabile:
+                    # DEVE combaciare anche la DATA: la stessa sfida in data diversa è
+                    # un'altra partita, e se non è pianificata a quella data va bloccata
+                    stessa_data = str(_cand.get("data"))[:10] == _data_sel
+                    if senza_ris and riusabile and stessa_data:
                         esistente = _cand
                         break
             except Exception:
