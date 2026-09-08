@@ -1506,12 +1506,9 @@ def pagina_estrattore(user):
         # salva subito lo storico
         try:
             if records:
-                # RIMPIAZZO INTELLIGENTE (opzione A): aggiorna lo storico della squadra
-                # protagonista (team1) con le partite nuove, cancellando le sue vecchie
-                # partite NON più presenti — ma proteggendo quelle che servono ad altre
-                # squadre seguite (is_target) o che sono fixture da pronosticare.
-                # NB: rimpiazzo storico DISATTIVATO (cancellava partite condivise con altre
-                # squadre). Merge sicuro: aggiunge/aggiorna senza cancellare nulla.
+                # MERGE sicuro: la partita esiste già (match su data+squadre)? l'upsert la
+                # aggiorna SENZA duplicare e SENZA cancellare nulla. Se non esiste, la aggiunge.
+                # 'preserva_competizione' mantiene il campionato già agganciato (verità Console).
                 salva_partite(records, preserva_competizione=True)
         except Exception as e:
             st.error(f"Errore nel salvataggio: {e}")
@@ -2110,8 +2107,24 @@ def pagina_database(user):
             if m.empty:
                 st.info("Nessuna partita trovata.")
             else:
+                # elenca le SQUADRE distinte che contengono il testo (nomi esatti),
+                # così distingui club diversi (es. 'AEK' vs 'AEK Larnaca')
+                nomi = set()
+                for _, p in m.iterrows():
+                    for col in ("squadra_casa", "squadra_trasferta"):
+                        nm = _txt(p.get(col))
+                        if q in nm.lower():
+                            nomi.add(nm)
+                st.markdown(f"**Squadre distinte trovate:** {', '.join(sorted(nomi))}")
+                st.caption("Sono nomi DIVERSI = squadre diverse (contate separatamente). "
+                           "Scegli il nome esatto per vedere solo quella squadra:")
+                _scelta_sq = st.selectbox("Squadra esatta", ["(tutte)"] + sorted(nomi),
+                                          key="dbg_isp_esatta")
+                if _scelta_sq != "(tutte)":
+                    m = df[(df["squadra_casa"] == _scelta_sq) |
+                           (df["squadra_trasferta"] == _scelta_sq)]
                 m2 = m.sort_values("data", ascending=False)
-                st.caption(f"{len(m2)} partite trovate:")
+                st.caption(f"{len(m2)} partite:")
                 _righe_isp = []
                 for _, p in m2.iterrows():
                     gc, gt = p.get("gol_casa"), p.get("gol_trasferta")
@@ -2462,13 +2475,21 @@ def pagina_database(user):
 #  PAGINA: ESTRATTORE RISULTATI
 # =============================================================================
 def pagina_estrattore_risultati(user):
+    import datetime as _dt_er
     st.header("📊 Estrattore risultati")
     st.caption("Incolla i risultati per competizione: il punteggio viene agganciato "
-               "alle partite già presenti nel database (match per nome squadra).")
+               "alle partite già presenti nel database. Seleziona la DATA delle partite: "
+               "il match avverrà solo con le partite di quel giorno (più preciso).")
 
     if not supabase_pronto():
         st.warning("Supabase non configurato.")
         return
+
+    # data delle partite del programma (default oggi, mantenuta)
+    if "er_data" not in st.session_state:
+        st.session_state["er_data"] = _dt_er.date.today()
+    data_ris = st.date_input("Data delle partite (il match userà solo questa data)",
+                             format="DD/MM/YYYY", key="er_data")
 
     testo = st.text_area("Incolla qui i risultati", height=260, key="testo_risultati")
     if not testo.strip():
@@ -2480,8 +2501,15 @@ def pagina_estrattore_risultati(user):
         st.warning("Nessun risultato riconosciuto.")
         return
 
-    part = carica_partite()
+    part_tutte = carica_partite()
     comp_df = carica_competizioni()
+    # FILTRA le partite alla data selezionata: il match avviene solo con quel giorno,
+    # evitando di agganciare il risultato a una partita omonima di un'altra data
+    part = part_tutte
+    if data_ris and not part_tutte.empty and "data" in part_tutte.columns:
+        _dd = pd.to_datetime(part_tutte["data"], errors="coerce").dt.date
+        part = part_tutte[_dd == data_ris].copy()
+        st.caption(f"🎯 Match ristretto alle {len(part)} partite del {data_ris:%d/%m/%Y}.")
 
     # DIAGNOSTICA PARSER: mostra cosa ha letto davvero dal testo (cerca una squadra)
     with st.expander("🔬 Cosa ha letto il parser (diagnostica)"):
@@ -2551,7 +2579,9 @@ def pagina_estrattore_risultati(user):
         })
         meta.append({"id": mid, "gc": r["gol_casa"], "gt": r["gol_trasferta"],
                      "qualif": r["qualificatore"], "competizione": r["competizione"],
-                     "tipo": cat})
+                     "tipo": cat,
+                     "casa_nome": _norm_squadra(r["casa"]),
+                     "trasf_nome": _norm_squadra(r["trasferta"])})
 
     st.markdown(f"**{len(righe)}** risultati letti · "
                 f"{sum(1 for x in righe if x['Stato'].startswith('✅'))} agganciabili")
@@ -2626,6 +2656,13 @@ def pagina_estrattore_risultati(user):
         st.caption("Nuove competizioni che verranno aggiunte in Configurazione: "
                    + ", ".join(lbl for lbl, _, _ in nuove))
 
+    crea_mancanti = st.checkbox(
+        "➕ Crea nel database le partite non trovate (auto-alimentazione dello storico)",
+        value=True, key="er_crea_mancanti",
+        help="Se una partita del programma non è nel database, viene creata con la data "
+             "selezionata e il risultato. Così lo storico si costruisce da solo, ordinato "
+             "per data, senza doverlo inserire a mano.")
+
     if st.button("💾 Aggancia risultati", type="primary"):
         # 1) registra le competizioni nuove (categoria da assegnare in Config)
         if nuove:
@@ -2662,18 +2699,42 @@ def pagina_estrattore_risultati(user):
                 updates.append(_prepara_update(meta[idx], mid))
                 visti.add(mid)
 
+        # 3) crea le partite NON TROVATE (auto-alimentazione), con la data selezionata
+        nuove_partite = []
+        if crea_mancanti and data_ris:
+            for idx, rrow in edit.iterrows():
+                m = meta[idx]
+                if m["id"]:
+                    continue  # già agganciata
+                # crea la partita col risultato e la data scelta
+                nuove_partite.append({
+                    "data": str(data_ris),
+                    "squadra_casa": m.get("casa_nome") or edit.iloc[idx]["Casa"],
+                    "squadra_trasferta": m.get("trasf_nome") or edit.iloc[idx]["Trasferta"],
+                    "gol_casa": m["gc"], "gol_trasferta": m["gt"],
+                    "competizione": m["competizione"],
+                    "tipo_partita": m["tipo"] or ND,
+                    "qualificatore": m["qualif"],
+                    "da_compilare": False, "is_target": False,
+                    "aggiornato_il": datetime.utcnow().isoformat(),
+                })
+
         try:
             if updates:
                 aggiorna_partite(updates)
-                # importante: aggiorna_partite ha già svuotato la cache; ora completa
-                # i pronostici leggendo le partite FRESCHE (col nuovo risultato)
+            if nuove_partite:
+                # merge sicuro (upsert per data+squadre): non duplica se già esiste
+                salva_partite(nuove_partite, preserva_competizione=True)
+            if updates or nuove_partite:
                 _sync = completa_risultati_pronostici()
             else:
                 _sync = 0
             _invalida_pronostici()
-            st.success(f"Agganciati {len(updates)} risultati."
-                       + (f" Aggiornati {_sync} pronostici nello storico." if _sync else "")
-                       + (f" Aggiunte {len(nuove)} competizioni in Configurazione." if nuove else ""))
+            st.success(
+                f"Agganciati {len(updates)} risultati a partite esistenti."
+                + (f" Create {len(nuove_partite)} partite nuove nello storico." if nuove_partite else "")
+                + (f" Aggiornati {_sync} pronostici." if _sync else "")
+                + (f" Aggiunte {len(nuove)} competizioni." if nuove else ""))
         except Exception as e:
             st.error(f"Errore: {e}")
 
