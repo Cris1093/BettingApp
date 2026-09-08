@@ -1327,6 +1327,53 @@ def pagina_estrattore(user):
 
     df, team1, team2, quote = parse_incontri(testo)
 
+    # === CONTROLLO PRELIMINARE: la partita da pronosticare DEVE essere già in pianificazione ===
+    # Fatto SUBITO dopo l'incollaggio, prima di qualsiasi salvataggio: se non è pianificata a
+    # questa data, blocca tutto e offre solo di aggiungerla alla pianificazione.
+    if team1 and team2:
+        _pianificata = False
+        try:
+            _cli_chk = get_client()
+            _rc = (_cli_chk.table("partite")
+                   .select("id,data,gol_casa,gol_trasferta,da_compilare,is_target")
+                   .eq("squadra_casa", team1).eq("squadra_trasferta", team2)
+                   .execute())
+            _dsel = str(data_target)[:10]
+            for _cc in (_rc.data or []):
+                senza_ris = _cc.get("gol_casa") is None or _cc.get("gol_trasferta") is None
+                riusabile = (_cc.get("da_compilare") is True or _cc.get("is_target") is True)
+                if senza_ris and riusabile and str(_cc.get("data"))[:10] == _dsel:
+                    _pianificata = True
+                    break
+        except Exception:
+            _pianificata = True  # in caso di errore di rete non bloccare
+
+        if not _pianificata:
+            st.error(f"⛔ **«{team1} - {team2}» ({str(data_target)[:10]}) non è presente "
+                     "nell'Estrattore pianificazione** per questa data.")
+            st.caption("Le partite da pronosticare devono prima essere inserite nella "
+                       "pianificazione (con data e campionato). Da qui non si creano partite nuove.")
+            st.markdown("**Cosa puoi fare:** aggiungila alla pianificazione con il pulsante qui "
+                        "sotto (poi torna qui per agganciare quote e analisi), oppure controlla "
+                        "di aver selezionato la data giusta in alto.")
+            _c1, _c2 = st.columns(2)
+            if _c1.button("➕ Aggiungi alla pianificazione", type="primary"):
+                try:
+                    salva_partite([{
+                        "data": str(data_target),
+                        "squadra_casa": team1, "squadra_trasferta": team2,
+                        "competizione": comp_target,
+                        "tipo_partita": categoria_o_nd(comp_target, comp_df_estr) if comp_target else ND,
+                        "is_target": True, "da_compilare": False,
+                        "aggiornato_il": datetime.utcnow().isoformat(),
+                    }])
+                    st.success(f"«{team1} - {team2}» aggiunta alla pianificazione per il "
+                               f"{str(data_target)[:10]}. Ora puoi agganciare quote e analisi.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Errore: {e}")
+            return   # STOP: non mostra né storico né salvataggi finché non è pianificata
+
     # Se il testo incollato cambia (es. incolli prima i risultati e pochi secondi dopo
     # aggiungi le quote), riallinea i campi quota/forma/rose ai NUOVI valori letti.
     # Altrimenti Streamlit terrebbe "congelato" il valore comparso la prima volta.
