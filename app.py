@@ -1556,7 +1556,7 @@ def pagina_estrattore(user):
                 _cli = get_client()
                 _r = (_cli.table("partite")
                       .select("id,squadra_casa,squadra_trasferta,gol_casa,gol_trasferta,"
-                              "da_compilare,is_target")
+                              "da_compilare,is_target,competizione")
                       .eq("squadra_casa", team1).eq("squadra_trasferta", team2)
                       .execute())
                 for _cand in (_r.data or []):
@@ -1571,6 +1571,11 @@ def pagina_estrattore(user):
                 if esistente is not None:
                     upd = dict(payload)
                     upd["id"] = esistente["id"]   # mantiene data pianificata, aggancia le quote
+                    # VERITÀ = Console/pianificazione: se la partita ha GIÀ un campionato,
+                    # NON lo sovrascrivo con quello selezionato in questa pagina
+                    if _txt(esistente.get("competizione")):
+                        upd.pop("competizione", None)
+                        upd.pop("tipo_partita", None)
                     aggiorna_partite([upd])
                 else:
                     rec = dict(payload)
