@@ -2096,6 +2096,30 @@ def pagina_database(user):
                 st.success(f"Rimossi {rimossi} duplicati. Lo storico è più pulito.")
                 st.rerun()
 
+    # === ISPETTORE STORICO PER SQUADRA (per trovare duplicati mascherati) ===
+    with st.expander("🔎 Ispeziona lo storico di una squadra"):
+        st.caption("Mostra TUTTE le partite salvate per una squadra, ordinate per data. "
+                   "Serve a scovare doppioni con nomi leggermente diversi (es. 'Verona' vs "
+                   "'Hellas Verona') che la pulizia automatica non riconosce.")
+        _cerca_sq = st.text_input("Nome squadra (anche parziale)", key="dbg_isp_squadra",
+                                  placeholder="es. AEK")
+        if _cerca_sq and _cerca_sq.strip():
+            q = _cerca_sq.strip().lower()
+            m = df[df["squadra_casa"].astype(str).str.lower().str.contains(q, na=False) |
+                   df["squadra_trasferta"].astype(str).str.lower().str.contains(q, na=False)]
+            if m.empty:
+                st.info("Nessuna partita trovata.")
+            else:
+                m2 = m.sort_values("data", ascending=False)
+                st.caption(f"{len(m2)} partite trovate:")
+                _righe_isp = []
+                for _, p in m2.iterrows():
+                    gc, gt = p.get("gol_casa"), p.get("gol_trasferta")
+                    ris = (f"{int(gc)}-{int(gt)}" if (_num_ok(gc) and _num_ok(gt)) else "—")
+                    _righe_isp.append(f"{str(p.get('data'))[:10]}  {p.get('squadra_casa')} - "
+                                      f"{p.get('squadra_trasferta')}  {ris}")
+                st.text("\n".join(_righe_isp))
+
     # --- Partite da compilare ---
     if "da_compilare" in df.columns:
         dac = df[df["da_compilare"] == True]
