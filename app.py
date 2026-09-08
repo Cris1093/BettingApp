@@ -1352,26 +1352,11 @@ def pagina_estrattore(user):
             st.error(f"⛔ **«{team1} - {team2}» ({str(data_target)[:10]}) non è presente "
                      "nell'Estrattore pianificazione** per questa data.")
             st.caption("Le partite da pronosticare devono prima essere inserite nella "
-                       "pianificazione (con data e campionato). Da qui non si creano partite nuove.")
-            st.markdown("**Cosa puoi fare:** aggiungila alla pianificazione con il pulsante qui "
-                        "sotto (poi torna qui per agganciare quote e analisi), oppure controlla "
-                        "di aver selezionato la data giusta in alto.")
-            _c1, _c2 = st.columns(2)
-            if _c1.button("➕ Aggiungi alla pianificazione", type="primary"):
-                try:
-                    salva_partite([{
-                        "data": str(data_target),
-                        "squadra_casa": team1, "squadra_trasferta": team2,
-                        "competizione": comp_target,
-                        "tipo_partita": categoria_o_nd(comp_target, comp_df_estr) if comp_target else ND,
-                        "is_target": True, "da_compilare": False,
-                        "aggiornato_il": datetime.utcnow().isoformat(),
-                    }])
-                    st.success(f"«{team1} - {team2}» aggiunta alla pianificazione per il "
-                               f"{str(data_target)[:10]}. Ora puoi agganciare quote e analisi.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Errore: {e}")
+                       "pianificazione (con data e campionato). Da qui non si creano partite nuove. "
+                       "Controlla di aver selezionato la data giusta in alto, oppure pulisci la "
+                       "maschera e inserisci un'altra partita.")
+            st.button("➕ Aggiungi nuova partita", type="primary",
+                      on_click=_reset_estrattore, key="btn_nuova_partita_blocco")
             return   # STOP: non mostra né storico né salvataggi finché non è pianificata
 
     # Se il testo incollato cambia (es. incolli prima i risultati e pochi secondi dopo
