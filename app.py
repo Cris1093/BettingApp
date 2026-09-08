@@ -1139,6 +1139,9 @@ def parse_pianificazione(testo):
     def is_time(x):
         return re.fullmatch(r"\d{1,2}:\d{2}", x.strip()) is not None
 
+    # marcatori da ignorare tra le squadre e l'orario (non sono competizioni né dati utili)
+    _skip = {"srf", "live", "da finire", "posticipata", "rinviata", "sospesa"}
+
     out = []
     comp_corr, naz_corr = None, None
     i = 0
@@ -1147,6 +1150,9 @@ def parse_pianificazione(testo):
             casa, trasf = righe[i], righe[i + 2]
             j = i + 4
             ora = None
+            # salta eventuali marcatori (SRF, Live, ecc.) prima dell'orario
+            while j < n and not is_time(righe[j]) and righe[j].strip().lower() in _skip:
+                j += 1
             if j < n and is_time(righe[j]):
                 ora = righe[j]
                 j += 1
