@@ -406,11 +406,88 @@ def carica_partite():
     return df
 
 
-def salva_partite(records):
-    """records: lista di dict pronti per upsert (con chiave unica data+casa+trasferta)."""
+def _rimpiazza_storico_squadra(squadra, nuovi_records):
+    """Rimpiazzo TOTALE dello storico di una squadra: cancella TUTTE le sue vecchie partite
+    concluse, così dopo il salvataggio restano SOLO quelle nuove che incolli (se incolli 15,
+    lo storico diventa ~15). PROTEGGE però:
+      - le fixture da pronosticare (is_target=True) di altre squadre;
+      - le partite senza risultato (future/in attesa).
+    In questo modo azzeri e ricostruisci lo storico della squadra senza toccare i pronostici
+    in corso né gli storici futuri.
+    Ritorna il numero di partite cancellate."""
+    cli = get_client()
+    if not cli or not squadra:
+        return 0
+    kteam = _key(_norm_squadra(squadra))
+    # chiavi (data, casa, trasf) delle partite NUOVE: quelle presenti nel nuovo elenco non
+    # vanno cancellate (verranno aggiornate dall'upsert, così non perdi il loro id/quote)
+    nuove_chiavi = set()
+    for r in nuovi_records:
+        nuove_chiavi.add((str(r.get("data"))[:10],
+                          _key(_norm_squadra(r.get("squadra_casa"))),
+                          _key(_norm_squadra(r.get("squadra_trasferta")))))
+    try:
+        res = (cli.table("partite")
+               .select("id,data,squadra_casa,squadra_trasferta,gol_casa,gol_trasferta,is_target")
+               .execute())
+        righe = res.data or []
+    except Exception:
+        return 0
+    da_cancellare = []
+    for p in righe:
+        kc = _key(_norm_squadra(p.get("squadra_casa")))
+        kt = _key(_norm_squadra(p.get("squadra_trasferta")))
+        if kteam not in (kc, kt):
+            continue  # non è una partita di questa squadra
+        chiave = (str(p.get("data"))[:10], kc, kt)
+        if chiave in nuove_chiavi:
+            continue  # è tra le nuove: la teniamo (upsert la aggiorna)
+        # PROTEZIONI: non cancellare fixture target o partite senza risultato
+        if p.get("is_target") is True:
+            continue
+        if p.get("gol_casa") is None or p.get("gol_trasferta") is None:
+            continue
+        # tutto il resto (vecchie partite concluse di questa squadra) -> CANCELLA
+        da_cancellare.append(p.get("id"))
+    for pid in da_cancellare:
+        try:
+            cli.table("partite").delete().eq("id", pid).execute()
+        except Exception:
+            pass
+    return len(da_cancellare)
+
+
+def salva_partite(records, preserva_competizione=False):
+    """records: lista di dict pronti per upsert (chiave unica data+casa+trasferta).
+    Se preserva_competizione=True, per le partite GIÀ ESISTENTI con un campionato agganciato
+    NON sovrascrive la competizione (la verità è quella già a DB / Console); usa quella del
+    record solo se la partita non ne ha ancora una."""
     cli = get_client()
     if not cli:
         raise RuntimeError("Supabase non configurato.")
+    if preserva_competizione and records:
+        # mappa (data,casa,trasf) -> competizione esistente, per non sovrascriverla
+        try:
+            esist = (cli.table("partite")
+                     .select("data,squadra_casa,squadra_trasferta,competizione")
+                     .execute()).data or []
+        except Exception:
+            esist = []
+        comp_esistente = {}
+        for e in esist:
+            k = (str(e.get("data"))[:10],
+                 _key(_norm_squadra(e.get("squadra_casa"))),
+                 _key(_norm_squadra(e.get("squadra_trasferta"))))
+            c = _txt(e.get("competizione"))
+            if c:
+                comp_esistente[k] = e.get("competizione")
+        for r in records:
+            k = (str(r.get("data"))[:10],
+                 _key(_norm_squadra(r.get("squadra_casa"))),
+                 _key(_norm_squadra(r.get("squadra_trasferta"))))
+            if k in comp_esistente:
+                # la partita esiste già con un campionato: TIENI quello (verità Console)
+                r["competizione"] = comp_esistente[k]
     cli.table("partite").upsert(
         records, on_conflict="data,squadra_casa,squadra_trasferta"
     ).execute()
@@ -484,19 +561,25 @@ def elimina_competizione(cid):
 
 
 def _salva_competizione_validata(rec):
-    """Salva/aggiorna una competizione col flag 'validato'. Se la colonna 'validato' non
-    esiste ancora nel DB, salva senza (fallback resiliente)."""
+    """Salva/aggiorna una competizione col flag 'validato'. Ritorna (ok, messaggio).
+    Se la colonna 'validato' non esiste nel DB, lo segnala esplicitamente (niente fallback
+    silenzioso: prima salvava senza flag e la competizione ricompariva)."""
     cli = get_client()
     if not cli:
-        raise RuntimeError("Supabase non configurato.")
+        return False, "Supabase non configurato."
     if not rec.get("id"):
         rec["id"] = str(uuid.uuid4())
     try:
         cli.table("competizioni").upsert(rec).execute()
-    except Exception:
-        rec2 = {k: v for k, v in rec.items() if k != "validato"}
-        cli.table("competizioni").upsert(rec2).execute()
-    st.cache_data.clear()
+        st.cache_data.clear()
+        return True, None
+    except Exception as e:
+        msg = str(e)
+        if "validato" in msg.lower() or "column" in msg.lower():
+            return False, ("La colonna 'validato' non esiste su Supabase. Lancia:\n"
+                           "alter table competizioni add column if not exists "
+                           "validato boolean default false;")
+        return False, msg
 
 
 # --- Calibrazione & pronostici ---
@@ -1423,7 +1506,13 @@ def pagina_estrattore(user):
         # salva subito lo storico
         try:
             if records:
-                salva_partite(records)
+                # RIMPIAZZO INTELLIGENTE (opzione A): aggiorna lo storico della squadra
+                # protagonista (team1) con le partite nuove, cancellando le sue vecchie
+                # partite NON più presenti — ma proteggendo quelle che servono ad altre
+                # squadre seguite (is_target) o che sono fixture da pronosticare.
+                # NB: rimpiazzo storico DISATTIVATO (cancellava partite condivise con altre
+                # squadre). Merge sicuro: aggiunge/aggiorna senza cancellare nulla.
+                salva_partite(records, preserva_competizione=True)
         except Exception as e:
             st.error(f"Errore nel salvataggio: {e}")
             return
@@ -1948,6 +2037,64 @@ def pagina_database(user):
     if df.empty:
         st.info("Nessuna partita salvata.")
         return
+
+    # === DEDUPLICAZIONE STORICO (pezzo 1) ===
+    with st.expander("🧹 Pulizia duplicati (partite ripetute)"):
+        st.caption("Trova le partite DUPLICATE (stessa data + squadra casa + squadra trasferta "
+                   "+ stesso risultato) e ne tiene una sola. Non cancella partite diverse: solo "
+                   "copie identiche. Mostra l'anteprima prima di rimuovere.")
+        # trova i duplicati: chiave = data + casa_norm + trasf_norm + risultato
+        _dupmap = {}
+        for _, p in df.iterrows():
+            gc, gt = p.get("gol_casa"), p.get("gol_trasferta")
+            ris = (f"{int(gc)}-{int(gt)}" if (_num_ok(gc) and _num_ok(gt)) else "NA")
+            k = (str(p.get("data"))[:10],
+                 _key(_norm_squadra(p.get("squadra_casa"))),
+                 _key(_norm_squadra(p.get("squadra_trasferta"))),
+                 ris)
+            _dupmap.setdefault(k, []).append(p)
+        # gruppi con più di 1 partita = duplicati
+        gruppi_dup = {k: v for k, v in _dupmap.items() if len(v) > 1}
+        n_extra = sum(len(v) - 1 for v in gruppi_dup.values())  # copie da rimuovere
+        if not gruppi_dup:
+            st.success("Nessun duplicato trovato: lo storico è pulito. 👍")
+        else:
+            st.warning(f"Trovati **{len(gruppi_dup)} gruppi** di partite duplicate, "
+                       f"per un totale di **{n_extra} copie** da rimuovere.")
+            # anteprima primi 15 gruppi
+            _ant = []
+            for k, v in list(gruppi_dup.items())[:15]:
+                p0 = v[0]
+                _ant.append(f"{p0.get('squadra_casa')} - {p0.get('squadra_trasferta')} "
+                            f"({k[0]}) {k[3]}  ×{len(v)}")
+            st.text("\n".join(_ant))
+            if len(gruppi_dup) > 15:
+                st.caption(f"…e altri {len(gruppi_dup) - 15} gruppi.")
+            st.caption("Rimuovendo, per ogni gruppo si tiene la partita con più informazioni "
+                       "(quote/target) e si cancellano le copie identiche.")
+            if st.button("🧹 Rimuovi i duplicati", type="primary"):
+                _cli = get_client()
+                rimossi = 0
+                for k, v in gruppi_dup.items():
+                    # tieni quella "migliore": priorità a is_target, poi a chi ha quote/id
+                    def _punteggio(p):
+                        s = 0
+                        if p.get("is_target") is True:
+                            s += 100
+                        if _num_ok(p.get("quota_iniziale_1")):
+                            s += 10
+                        return s
+                    v_ord = sorted(v, key=_punteggio, reverse=True)
+                    tieni = v_ord[0]
+                    for p in v_ord[1:]:
+                        try:
+                            _cli.table("partite").delete().eq("id", p.get("id")).execute()
+                            rimossi += 1
+                        except Exception:
+                            pass
+                _invalida_partite()
+                st.success(f"Rimossi {rimossi} duplicati. Lo storico è più pulito.")
+                st.rerun()
 
     # --- Partite da compilare ---
     if "da_compilare" in df.columns:
@@ -5643,22 +5790,22 @@ def pagina_console_partite(user):
                                         key=f"vliv_{_idx}")
                 if st.button("✅ Validazione definitiva", key=f"vbtn_{_idx}",
                              type="primary"):
-                    try:
-                        rec = {
-                            "nome_lungo": v_nome.strip() or code,
-                            "nazione": v_naz.strip() or None,
-                            "nome_corto": v_corto.strip() or None,
-                            "categoria": v_cat,
-                            "livello": int(v_liv),
-                            "validato": True,
-                        }
-                        if cid:
-                            rec["id"] = cid
-                        _salva_competizione_validata(rec)
-                        st.success(f"«{v_nome or code}» validato.")
+                    rec = {
+                        "nome_lungo": v_nome.strip() or code,
+                        "nazione": v_naz.strip() or None,
+                        "nome_corto": v_corto.strip() or None,
+                        "categoria": v_cat,
+                        "livello": int(v_liv),
+                        "validato": True,
+                    }
+                    if cid:
+                        rec["id"] = cid
+                    ok, msg = _salva_competizione_validata(rec)
+                    if ok:
+                        st.success(f"«{v_nome or code}» validato e scolpito nella pietra. 🪨")
                         st.rerun()
-                    except Exception as e:
-                        st.error(f"Errore: {e}")
+                    else:
+                        st.error(f"NON salvato: {msg}")
 
     # --- pulsanti "→ Pronostico" per ogni partita IN ATTESA ---
     st.divider()
