@@ -1584,11 +1584,12 @@ def pagina_estrattore(user):
                     n_salvate += 1
                 else:
                     # la partita da pronosticare NON è nel pianificatore: non la creo qui.
-                    # Va prima inserita nell'Estrattore pianificazione (col suo campionato).
-                    st.error(f"⛔ «{team1} - {team2}» non è presente nell'Estrattore "
-                             "pianificazione. Inseriscila prima lì (con data e campionato), "
-                             "poi torna qui per agganciare quote e analisi. La partita da "
-                             "pronosticare NON è stata salvata.")
+                    st.error(f"⛔ «{team1} - {team2}» ({str(data_target)[:10]}) non è presente "
+                             "nell'Estrattore pianificazione per questa data. Inseriscila prima "
+                             "lì (con data e campionato), poi torna qui. NON salvata.")
+                    st.caption(f"🔎 Diagnostica: cercata partita casa='{team1}', "
+                               f"trasferta='{team2}', data={str(data_target)[:10]} tra le "
+                               "fixture pianificate (da_compilare o is_target, senza risultato).")
             except Exception as e:
                 st.error(f"Errore nel salvataggio della partita da pronosticare: {e}")
                 return
