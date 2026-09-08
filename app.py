@@ -1494,20 +1494,32 @@ def pagina_estrattore(user):
             st.error("Supabase non configurato.")
             return
         records = []
+        scartate_future = []
         for _, r in edit.iterrows():
             if not r["Casa"] or not r["Trasferta"] or pd.isna(r["Data"]):
+                continue
+            _gc = None if pd.isna(r["Gol Casa"]) else int(r["Gol Casa"])
+            _gt = None if pd.isna(r["Gol Trasferta"]) else int(r["Gol Trasferta"])
+            # Lo storico accetta SOLO partite GIÀ GIOCATE (con risultato). Una partita senza
+            # risultato è futura: deve passare dall'Estrattore pianificazione, non da qui.
+            if _gc is None or _gt is None:
+                scartate_future.append(f"{r['Casa']} - {r['Trasferta']} ({r['Data']})")
                 continue
             records.append({
                 "data": str(r["Data"]),
                 "competizione": r["Competizione"],
                 "squadra_casa": r["Casa"],
                 "squadra_trasferta": r["Trasferta"],
-                "gol_casa": None if pd.isna(r["Gol Casa"]) else int(r["Gol Casa"]),
-                "gol_trasferta": None if pd.isna(r["Gol Trasferta"]) else int(r["Gol Trasferta"]),
+                "gol_casa": _gc,
+                "gol_trasferta": _gt,
                 "qualificatore": None if pd.isna(r["Note"]) else r["Note"],
                 "inserito_da": user["username"],
                 "aggiornato_il": datetime.utcnow().isoformat(),
             })
+        if scartate_future:
+            st.warning("⛔ Queste partite NON hanno un risultato e non sono state salvate nello "
+                       "storico (le partite future vanno inserite nell'Estrattore "
+                       "pianificazione):\n\n" + "\n".join(f"• {x}" for x in scartate_future))
 
         # salva subito lo storico
         try:
