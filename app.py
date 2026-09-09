@@ -5918,11 +5918,21 @@ def pagina_console_partite(user):
                  "Torneo secondario", "Amichevole", "Altro", "Non assegnata"]
         for _idx, (code, riga_comp) in enumerate(da_validare):
             with st.container(border=True):
-                # valori attuali (se il campionato è già a DB) o proposti
-                nome_l = _txt(riga_comp.get("nome_lungo")) if riga_comp is not None else _txt(code)
-                naz = _txt(riga_comp.get("nazione")) if riga_comp is not None else ""
-                nome_c = _txt(riga_comp.get("nome_corto")) if riga_comp is not None else ""
-                cat = _txt(riga_comp.get("categoria")) if riga_comp is not None else "Non assegnata"
+                # valori attuali (se il campionato è già a DB) o proposti (se nuovo)
+                if riga_comp is not None:
+                    nome_l = _txt(riga_comp.get("nome_lungo"))
+                    naz = _txt(riga_comp.get("nazione"))
+                    nome_c = _txt(riga_comp.get("nome_corto"))
+                    cat = _txt(riga_comp.get("categoria"))
+                else:
+                    # competizione NUOVA: 'code' è l'etichetta "Nome | NAZIONE" -> separала
+                    if " | " in _txt(code):
+                        _nm, _nz = _txt(code).rsplit(" | ", 1)
+                        nome_l, naz = _nm.strip(), _nz.strip()
+                    else:
+                        nome_l, naz = _txt(code), ""
+                    nome_c = ""
+                    cat = "Non assegnata"
                 liv = riga_comp.get("livello") if riga_comp is not None else None
                 cid = riga_comp.get("id") if riga_comp is not None else None
 
