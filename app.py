@@ -546,10 +546,25 @@ def upsert_competizioni(records):
     cli = get_client()
     if not cli:
         raise RuntimeError("Supabase non configurato.")
-    # genera l'id lato app per le righe nuove (robusto anche se il DB non ha il default)
+    # carica le competizioni esistenti per riconoscere quelle già presenti (evita duplicati):
+    # il match è per (nome_lungo + nazione) normalizzati
+    try:
+        esist = cli.table("competizioni").select("id,nome_lungo,nazione,nome_corto").execute().data or []
+    except Exception:
+        esist = []
+    def _mk(nl, na):
+        return (_key(_txt(nl)), _key(_txt(na)))
+    idx_nome = {_mk(e.get("nome_lungo"), e.get("nazione")): e.get("id") for e in esist}
+    idx_corto = {_key(_txt(e.get("nome_corto"))): e.get("id")
+                 for e in esist if _txt(e.get("nome_corto"))}
     for rec in records:
-        if not rec.get("id"):
-            rec["id"] = str(uuid.uuid4())
+        if rec.get("id"):
+            continue
+        # esiste già per nome+nazione? o per nome corto? -> riusa quell'id (aggiorna, non duplica)
+        _id = idx_nome.get(_mk(rec.get("nome_lungo"), rec.get("nazione")))
+        if not _id and _txt(rec.get("nome_corto")):
+            _id = idx_corto.get(_key(_txt(rec.get("nome_corto"))))
+        rec["id"] = _id or str(uuid.uuid4())
     cli.table("competizioni").upsert(records).execute()
     st.cache_data.clear()
 
@@ -568,7 +583,20 @@ def _salva_competizione_validata(rec):
     if not cli:
         return False, "Supabase non configurato."
     if not rec.get("id"):
-        rec["id"] = str(uuid.uuid4())
+        # cerca una competizione ESISTENTE con lo stesso nome+nazione (o nome corto) per
+        # AGGIORNARLA invece di crearne una nuova (evita i duplicati)
+        try:
+            esist = cli.table("competizioni").select("id,nome_lungo,nazione,nome_corto").execute().data or []
+        except Exception:
+            esist = []
+        _mk = lambda nl, na: (_key(_txt(nl)), _key(_txt(na)))
+        found = None
+        for e in esist:
+            if _mk(e.get("nome_lungo"), e.get("nazione")) == _mk(rec.get("nome_lungo"), rec.get("nazione")):
+                found = e.get("id"); break
+            if _txt(rec.get("nome_corto")) and _key(_txt(e.get("nome_corto"))) == _key(_txt(rec.get("nome_corto"))):
+                found = e.get("id"); break
+        rec["id"] = found or str(uuid.uuid4())
     try:
         cli.table("competizioni").upsert(rec).execute()
         st.cache_data.clear()
@@ -4020,6 +4048,44 @@ def pagina_configurazione(user):
     if user["ruolo"] != "admin":
         st.info("Solo gli amministratori possono gestire utenti e backup.")
         return
+
+    # === PULIZIA DUPLICATI COMPETIZIONI ===
+    with st.expander("🧹 Pulizia competizioni duplicate"):
+        st.caption("Trova competizioni ripetute (stesso nome + nazione) e ne tiene una sola, "
+                   "conservando quella VALIDATA se esiste. Anteprima prima di rimuovere.")
+        _cd = carica_competizioni()
+        if _cd.empty:
+            st.info("Nessuna competizione.")
+        else:
+            _grp = {}
+            for _, c in _cd.iterrows():
+                k = (_key(_txt(c.get("nome_lungo"))), _key(_txt(c.get("nazione"))))
+                _grp.setdefault(k, []).append(c)
+            dup = {k: v for k, v in _grp.items() if len(v) > 1}
+            if not dup:
+                st.success("Nessun duplicato tra le competizioni. 👍")
+            else:
+                n_extra = sum(len(v) - 1 for v in dup.values())
+                st.warning(f"Trovati {len(dup)} gruppi duplicati ({n_extra} copie da rimuovere):")
+                for k, v in list(dup.items())[:20]:
+                    st.text(f"{v[0].get('nome_lungo')} | {v[0].get('nazione')}  ×{len(v)}")
+                if st.button("🧹 Rimuovi competizioni duplicate", type="primary"):
+                    _cli = get_client()
+                    rimossi = 0
+                    for k, v in dup.items():
+                        # tieni la validata (se c'è), altrimenti la prima
+                        def _pt(c):
+                            return 1 if c.get("validato") else 0
+                        v_ord = sorted(v, key=_pt, reverse=True)
+                        for c in v_ord[1:]:
+                            try:
+                                _cli.table("competizioni").delete().eq("id", c.get("id")).execute()
+                                rimossi += 1
+                            except Exception:
+                                pass
+                    st.cache_data.clear()
+                    st.success(f"Rimosse {rimossi} competizioni duplicate.")
+                    st.rerun()
 
     st.subheader("👥 Utenti")
     utenti = carica_utenti()
