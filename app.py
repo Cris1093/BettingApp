@@ -5917,6 +5917,9 @@ def pagina_console_partite(user):
         _cats = ["Campionato", "Coppa nazionale", "Coppa internazionale", "Playoff",
                  "Torneo secondario", "Amichevole", "Altro", "Non assegnata"]
         for _idx, (code, riga_comp) in enumerate(da_validare):
+            # KEY STABILE basata sul codice competizione (non sull'indice): evita che i
+            # campi si "sfalsino" tra un refresh e l'altro quando la lista cambia ordine
+            _kk = re.sub(r"[^a-z0-9]", "_", _key(code))[:60] or f"c{_idx}"
             with st.container(border=True):
                 # valori attuali (se il campionato è già a DB) o proposti (se nuovo)
                 if riga_comp is not None:
@@ -5925,7 +5928,7 @@ def pagina_console_partite(user):
                     nome_c = _txt(riga_comp.get("nome_corto"))
                     cat = _txt(riga_comp.get("categoria"))
                 else:
-                    # competizione NUOVA: 'code' è l'etichetta "Nome | NAZIONE" -> separала
+                    # competizione NUOVA: 'code' è l'etichetta "Nome | NAZIONE" -> separala
                     if " | " in _txt(code):
                         _nm, _nz = _txt(code).rsplit(" | ", 1)
                         nome_l, naz = _nm.strip(), _nz.strip()
@@ -5938,17 +5941,17 @@ def pagina_console_partite(user):
 
                 st.markdown(f"**{nome_l or code}**")
                 c1, c2 = st.columns(2)
-                v_nome = c1.text_input("Nome lungo", value=nome_l, key=f"vnome_{_idx}")
-                v_naz = c2.text_input("Nazione", value=naz, key=f"vnaz_{_idx}")
+                v_nome = c1.text_input("Nome lungo", value=nome_l, key=f"vnome_{_kk}")
+                v_naz = c2.text_input("Nazione", value=naz, key=f"vnaz_{_kk}")
                 c3, c4, c5 = st.columns(3)
-                v_corto = c3.text_input("Nome corto", value=nome_c, key=f"vcorto_{_idx}")
+                v_corto = c3.text_input("Nome corto", value=nome_c, key=f"vcorto_{_kk}")
                 v_cat = c4.selectbox("Categoria", _cats,
                                      index=_cats.index(cat) if cat in _cats else len(_cats) - 1,
-                                     key=f"vcat_{_idx}")
+                                     key=f"vcat_{_kk}")
                 v_liv = c5.number_input("Livello", min_value=0, max_value=10,
                                         value=int(liv) if liv is not None and not pd.isna(liv) else 1,
-                                        key=f"vliv_{_idx}")
-                if st.button("✅ Validazione definitiva", key=f"vbtn_{_idx}",
+                                        key=f"vliv_{_kk}")
+                if st.button("✅ Validazione definitiva", key=f"vbtn_{_kk}",
                              type="primary"):
                     rec = {
                         "nome_lungo": v_nome.strip() or code,
