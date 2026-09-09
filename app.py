@@ -1172,28 +1172,61 @@ def parse_pianificazione(testo):
 
     out = []
     comp_corr, naz_corr = None, None
+
+    def _dedup(seq):
+        """Rimuove ripetizioni consecutive identiche: ['A','A','B','B']->['A','B'],
+        ['A','B','B']->['A','B']. Gestisce squadre ripetute 1 o 2 volte."""
+        res = []
+        for x in seq:
+            if not res or res[-1] != x:
+                res.append(x)
+        return res
+
     i = 0
     while i < n:
-        if i + 3 < n and righe[i] == righe[i + 1] and righe[i + 2] == righe[i + 3]:
-            casa, trasf = righe[i], righe[i + 2]
-            j = i + 4
-            ora = None
-            # salta eventuali marcatori (SRF, Live, ecc.) prima dell'orario
-            while j < n and not is_time(righe[j]) and righe[j].strip().lower() in _skip:
-                j += 1
-            if j < n and is_time(righe[j]):
-                ora = righe[j]
-                j += 1
+        # cerca il prossimo ORARIO (àncora affidabile che chiude una partita)
+        j = i
+        while j < n and not is_time(righe[j]):
+            j += 1
+        if j >= n:
+            # nessun altro orario: le righe restanti sono intestazioni competizione
+            k = i
+            while k < n:
+                # coppia nome+nazione (se plausibile), altrimenti avanza
+                comp_corr = righe[k]
+                naz_corr = righe[k + 1] if k + 1 < n else None
+                k += 2
+            break
+        # blocco [i .. j-1] = intestazioni + squadre; righe[j] = orario
+        blocco = righe[i:j]
+        # salta i marcatori (SRF, Live...) in coda al blocco
+        blocco = [b for b in blocco if b.strip().lower() not in _skip]
+        # le ULTIME righe del blocco sono le squadre (deduplicate); quello prima è intestazione
+        deduped = _dedup(blocco)
+        if len(deduped) >= 2:
+            casa, trasf = deduped[-2], deduped[-1]
+            # ciò che precede le due squadre nel blocco è intestazione competizione
+            testa = deduped[:-2]
+            # aggiorna la competizione SOLO se troviamo una nuova intestazione valida
+            # (non un orario o un marcatore residuo): altrimenti eredita la precedente
+            _nuovo_comp = None
+            _nuovo_naz = None
+            if len(testa) >= 2 and not is_time(testa[-2]) and not is_time(testa[-1]):
+                _nuovo_comp, _nuovo_naz = testa[-2], testa[-1]
+            elif len(testa) == 1 and not is_time(testa[-1]):
+                _nuovo_comp = testa[-1]
+            if _nuovo_comp:
+                comp_corr, naz_corr = _nuovo_comp, _nuovo_naz
+            # sicurezza: casa/trasf non devono essere orari (blocco malformato) -> scarta
+            if is_time(casa) or is_time(trasf):
+                i = j + 1
+                continue
             out.append({
                 "competizione": label_competizione(comp_corr, naz_corr) or None,
                 "nome_lungo": comp_corr, "nazione": naz_corr,
-                "casa": casa, "trasferta": trasf, "ora": ora,
+                "casa": casa, "trasferta": trasf, "ora": righe[j],
             })
-            i = j
-            continue
-        comp_corr = righe[i]
-        naz_corr = righe[i + 1] if i + 1 < n else None
-        i += 2
+        i = j + 1
     return out
 
 
