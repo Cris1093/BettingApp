@@ -2920,6 +2920,9 @@ def pagina_estrattore_pianificazione(user):
     if nuove:
         st.caption("Nuove competizioni che verranno aggiunte in Configurazione: "
                    + ", ".join(lbl for lbl, _, _ in nuove))
+        with st.expander("🔎 Diagnostica: nome e nazione estratti dal parser"):
+            for lbl, nl, na in nuove:
+                st.text(f"nome_lungo={nl!r}  |  nazione={na!r}")
 
     if st.button("💾 Crea partite da compilare", type="primary"):
         if nuove:
