@@ -1919,7 +1919,7 @@ def genera_docx_nuova_analisi(df, comp_df):
                                  odds=odds, variazioni=_variazioni_da_row(row),
                                  escludi_id=row.get("id"),
                                  competizione=_label_da_comp(row.get("competizione"), comp_df))
-        if not racc:
+        if not racc or racc.get("_storico_insufficiente"):
             doc.add_paragraph("Storico insufficiente per l'analisi.")
         else:
             doc.add_paragraph().add_run(f"Pronostico: {racc['pronostico']['testo']}").bold = True
@@ -1967,7 +1967,7 @@ def genera_docx_mercati(df, comp_df):
                                  odds=odds, variazioni=_variazioni_da_row(row),
                                  escludi_id=row.get("id"),
                                  competizione=_label_da_comp(row.get("competizione"), comp_df))
-        if not racc:
+        if not racc or racc.get("_storico_insufficiente"):
             doc.add_paragraph("Storico insufficiente per l'analisi.")
         else:
             for sez in racc["sezioni"]:
@@ -2275,20 +2275,28 @@ def pagina_database(user):
                    "il sistema tratta come una sola. Rinominane una per separarle (es. aggiungi "
                    "il paese), aggiornando tutte le sue partite di quella nazione.")
         comp_df_om = carica_competizioni()
-        # per ogni squadra, raccoglie le nazioni dei campionati in cui compare
+        # nazioni "non-paese" = competizioni internazionali/continentali: NON identificano il
+        # paese della squadra, quindi vanno IGNORATE nel rilevamento omonime (una squadra che
+        # gioca il suo campionato + una coppa internazionale NON è una squadra diversa!)
+        _non_paesi = {"europa", "asia", "africa", "sud america", "sudamerica", "nord america",
+                      "nord e centro america", "centro america", "oceania", "mondo",
+                      "australia e oceania", "internazionale", "world", "conmebol", "concacaf",
+                      "uefa", "afc", "caf", "fifa"}
+        # per ogni squadra, raccoglie SOLO le nazioni-paese dei campionati in cui compare
         naz_per_squadra = {}
         for _, p in df.iterrows():
             naz = _nazione_di(p.get("competizione"), comp_df_om)
-            if not naz:
-                continue
+            if not naz or _key(naz) in _non_paesi:
+                continue   # ignora competizioni internazionali/continentali
             for col in ("squadra_casa", "squadra_trasferta"):
                 sq = _txt(p.get(col))
                 if sq:
                     naz_per_squadra.setdefault(sq, set()).add(naz)
-        # omonime = stesso nome con >1 nazione
+        # VERE omonime = stesso nome in >1 PAESE diverso (non conta le coppe internazionali)
         ambigue = {sq: nz for sq, nz in naz_per_squadra.items() if len(nz) > 1}
         if not ambigue:
-            st.success("Nessuna squadra omonima rilevata (nessun nome gioca in più nazioni). 👍")
+            st.success("Nessuna squadra omonima reale rilevata (nessun nome gioca in "
+                       "campionati nazionali di paesi diversi). 👍")
         else:
             st.warning(f"Trovate **{len(ambigue)} squadre** che giocano in più nazioni "
                        "(potenziali omonime da separare):")
@@ -4628,8 +4636,12 @@ def analisi_ragionata(df, home, away, data_partita=None, odds=None, variazioni=N
     t_key = _key(competizione) if competizione else None
     ph = _partite_squadra_evidenze(df, home, data_partita, escludi_id, comp_df, t_liv, t_cat, t_key, recency_decay, indice)
     pa = _partite_squadra_evidenze(df, away, data_partita, escludi_id, comp_df, t_liv, t_cat, t_key, recency_decay, indice)
-    if not ph or not pa:
-        return None
+    # servono almeno 15 partite di storico per squadra: sotto questa soglia il pronostico
+    # non è affidabile e non viene generato
+    MIN_STORICO = 15
+    if len(ph) < MIN_STORICO or len(pa) < MIN_STORICO:
+        return {"_storico_insufficiente": True, "n_home": len(ph), "n_away": len(pa),
+                "min_richiesto": MIN_STORICO, "home": home, "away": away}
     hcap_h = _handicap_livello(ph, t_liv)
     hcap_a = _handicap_livello(pa, t_liv)
     ev = evidenze.costruisci_evidenze(ph, pa, odds=odds, variazioni=variazioni,
@@ -4655,6 +4667,13 @@ def _riepilogo_pesi(partite, hcap):
 
 def render_racconto_st(racc):
     """Rende l'analisi ragionata (nuovo motore) in Streamlit."""
+    if racc and racc.get("_storico_insufficiente"):
+        st.warning(f"⛔ Storico insufficiente per generare il pronostico. Servono almeno "
+                   f"**{racc.get('min_richiesto', 15)} partite** per squadra: "
+                   f"{racc.get('home','casa')} ne ha **{racc.get('n_home', 0)}**, "
+                   f"{racc.get('away','ospite')} ne ha **{racc.get('n_away', 0)}**. "
+                   "Inserisci più partite di storico da «Ultimi risultati e quote».")
+        return
     if not racc:
         st.info("Analisi ragionata non disponibile (storico insufficiente).")
         return
@@ -4895,6 +4914,9 @@ def pagina_analisi(user):
                              escludi_id=(row.get("id") if not pend.empty else None),
                              competizione=comp_target, recency_decay=an_recency)
     render_racconto_st(racc)
+    # storico insufficiente: non generare/salvare il pronostico monco, ferma qui l'analisi
+    if racc and racc.get("_storico_insufficiente"):
+        return
 
     # --- 🤖 Pronostico del Motore ML (predittore) ---
     with st.expander("🤖 Pronostico Motore ML (impara dallo storico)"):
@@ -5174,6 +5196,8 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False, lim
             racc = analisi_ragionata(df_tutte, r.get("squadra_casa"), r.get("squadra_trasferta"),
                                      data_partita=r.get("data"), escludi_id=pid,
                                      competizione=comp, odds=odds, indice=indice)
+            if racc and racc.get("_storico_insufficiente"):
+                continue   # meno di 15 partite: niente pronostico per questa
             if not racc:
                 # il nuovo motore non ha prodotto nulla (una squadra senza storico nel DB):
                 # invece di SALTARE (lasciando merc_motore NULL), calcola col vecchio motore
@@ -5296,11 +5320,16 @@ def _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config
     racc = analisi_ragionata(df_uso, home, away, data_partita=data_partita, odds=odds,
                              variazioni=variazioni, escludi_id=row.get("id"),
                              competizione=comp_target, indice=indice)
+    # meno di 15 partite di storico: non genero il pronostico
+    if racc and racc.get("_storico_insufficiente"):
+        return None
     # fallback: se col df ridotto/indice non esce nulla, riprova col df COMPLETO senza indice
     if racc is None:
         racc = analisi_ragionata(df, home, away, data_partita=data_partita, odds=odds,
                                  variazioni=variazioni, escludi_id=row.get("id"),
                                  competizione=comp_target)
+    if racc and racc.get("_storico_insufficiente"):
+        return None
     # se anche così è None, si prosegue: i campi motore useranno il fallback del vecchio
     # motore più sotto, così il pronostico viene comunque salvato completo.
     p = a["prob"]
