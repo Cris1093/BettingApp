@@ -1035,6 +1035,18 @@ def categoria_di(codice_o_label, comp_df):
 ND = "ND"  # categoria/tipo non determinabile
 
 
+def _nazione_di(codice_o_label, comp_df):
+    """Data una competizione, restituisce la nazione dell'anagrafica (es. 'ITALIA'), o None.
+    Serve a distinguere squadre omonime in base al paese del campionato che giocano."""
+    if comp_df is None or comp_df.empty or not codice_o_label:
+        return None
+    k = _key(codice_o_label)
+    for _, c in comp_df.iterrows():
+        if k in _chiavi_competizione(c):
+            return _txt(c.get("nazione")) or None
+    return None
+
+
 def categoria_o_nd(codice_o_label, comp_df):
     return categoria_di(codice_o_label, comp_df) or ND
 
@@ -2256,6 +2268,67 @@ def pagina_database(user):
                                       f"{p.get('squadra_trasferta')}  {ris}")
                 st.text("\n".join(_righe_isp))
 
+    # === SQUADRE OMONIME (stesso nome, nazioni diverse) ===
+    with st.expander("🕵️ Squadre omonime (stesso nome, campionati di nazioni diverse)"):
+        st.caption("Rileva squadre con lo STESSO nome che giocano in campionati di nazioni "
+                   "diverse (es. 'San Antonio' in Ecuador e in USA). Sono squadre DIVERSE che "
+                   "il sistema tratta come una sola. Rinominane una per separarle (es. aggiungi "
+                   "il paese), aggiornando tutte le sue partite di quella nazione.")
+        comp_df_om = carica_competizioni()
+        # per ogni squadra, raccoglie le nazioni dei campionati in cui compare
+        naz_per_squadra = {}
+        for _, p in df.iterrows():
+            naz = _nazione_di(p.get("competizione"), comp_df_om)
+            if not naz:
+                continue
+            for col in ("squadra_casa", "squadra_trasferta"):
+                sq = _txt(p.get(col))
+                if sq:
+                    naz_per_squadra.setdefault(sq, set()).add(naz)
+        # omonime = stesso nome con >1 nazione
+        ambigue = {sq: nz for sq, nz in naz_per_squadra.items() if len(nz) > 1}
+        if not ambigue:
+            st.success("Nessuna squadra omonima rilevata (nessun nome gioca in più nazioni). 👍")
+        else:
+            st.warning(f"Trovate **{len(ambigue)} squadre** che giocano in più nazioni "
+                       "(potenziali omonime da separare):")
+            _scelta_sq = st.selectbox("Squadra da separare",
+                                      sorted(ambigue.keys()), key="om_squadra")
+            if _scelta_sq:
+                nazioni = sorted(ambigue[_scelta_sq])
+                st.caption(f"«{_scelta_sq}» compare in: {', '.join(nazioni)}")
+                st.markdown("**Rinomina le partite di questa squadra giocate in una nazione:**")
+                col1, col2 = st.columns(2)
+                naz_sel = col1.selectbox("Nazione da isolare", nazioni, key="om_naz")
+                nuovo_nome = col2.text_input("Nuovo nome per questa squadra",
+                                             value=f"{_scelta_sq} ({naz_sel})", key="om_nuovo")
+                if st.button("✏️ Rinomina le partite di questa nazione", type="primary"):
+                    _cli = get_client()
+                    _agg = 0
+                    for _, p in df.iterrows():
+                        naz = _nazione_di(p.get("competizione"), comp_df_om)
+                        if naz != naz_sel:
+                            continue
+                        _upd = {}
+                        if _txt(p.get("squadra_casa")) == _scelta_sq:
+                            _upd["squadra_casa"] = nuovo_nome
+                        if _txt(p.get("squadra_trasferta")) == _scelta_sq:
+                            _upd["squadra_trasferta"] = nuovo_nome
+                        if _upd:
+                            try:
+                                _cli.table("partite").update(_upd).eq("id", p.get("id")).execute()
+                                _agg += 1
+                            except Exception:
+                                pass
+                    _invalida_partite()
+                    st.success(f"Rinominate {_agg} partite: «{_scelta_sq}» → «{nuovo_nome}» "
+                               f"(nazione {naz_sel}). Ora è una squadra distinta.")
+                    st.rerun()
+                st.caption("⚠️ Le coppe internazionali (nazione neutra tipo 'Mondo') non "
+                           "vengono toccate: quelle partite restano col nome originale e le "
+                           "aggancerai manualmente alla squadra giusta quando serve.")
+
+    # === SQUADRE OMONIME - fine ===
     # --- Partite da compilare ---
     if "da_compilare" in df.columns:
         dac = df[df["da_compilare"] == True]
