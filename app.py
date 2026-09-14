@@ -64,6 +64,68 @@ def get_client():
     return create_client(url, key)
 
 
+# ============================================================================
+#  PROFILER: traccia la durata di ogni operazione/query per la diagnostica.
+#  I tempi si accumulano in session_state e si azzerano all'export Excel.
+# ============================================================================
+import time as _time_mod
+from contextlib import contextmanager
+
+
+def _prof_store():
+    if "_profiler_log" not in st.session_state:
+        st.session_state["_profiler_log"] = []
+    return st.session_state["_profiler_log"]
+
+
+@contextmanager
+def profila(nome, categoria="operazione"):
+    """Context manager che cronometra un blocco e lo registra nel profiler.
+    Uso: with profila('carica partite', 'query'): ...il codice..."""
+    _t0 = _time_mod.perf_counter()
+    _err = ""
+    try:
+        yield
+    except Exception as e:
+        _err = str(e)[:80]
+        raise
+    finally:
+        _dt = (_time_mod.perf_counter() - _t0) * 1000  # ms
+        try:
+            _prof_store().append({
+                "quando": datetime.now().strftime("%H:%M:%S"),
+                "categoria": categoria,
+                "operazione": nome,
+                "ms": round(_dt, 1),
+                "errore": _err,
+            })
+        except Exception:
+            pass
+
+
+def profila_fn(nome, categoria, fn, *args, **kwargs):
+    """Versione funzionale: cronometra fn(*args) e ritorna il risultato."""
+    _t0 = _time_mod.perf_counter()
+    _err = ""
+    _res = None
+    try:
+        _res = fn(*args, **kwargs)
+    except Exception as e:
+        _err = str(e)[:80]
+        raise
+    finally:
+        _dt = (_time_mod.perf_counter() - _t0) * 1000
+        try:
+            _prof_store().append({
+                "quando": datetime.now().strftime("%H:%M:%S"),
+                "categoria": categoria, "operazione": nome,
+                "ms": round(_dt, 1), "errore": _err,
+            })
+        except Exception:
+            pass
+    return _res
+
+
 def supabase_pronto():
     return get_client() is not None
 
@@ -373,16 +435,29 @@ def _fetch_tutte(_cli, tabella, order_col="data", desc=True, colonne="*"):
     righe = []
     step = 1000
     start = 0
+    _n_query = 0
+    _t0 = _time_mod.perf_counter()
     while True:
         q = _cli.table(tabella).select(colonne)
         if order_col:
             q = q.order(order_col, desc=desc)
         res = q.range(start, start + step - 1).execute()
+        _n_query += 1
         batch = res.data or []
         righe.extend(batch)
         if len(batch) < step:
             break
         start += step
+    # registra nel profiler (fuori dalla cache: viene chiamata a ogni fetch reale)
+    try:
+        _dt = (_time_mod.perf_counter() - _t0) * 1000
+        _prof_store().append({
+            "quando": datetime.now().strftime("%H:%M:%S"), "categoria": "query DB",
+            "operazione": f"FETCH {tabella} ({_n_query} query, {len(righe)} righe)",
+            "ms": round(_dt, 1), "errore": "",
+        })
+    except Exception:
+        pass
     return righe
 
 
@@ -1227,14 +1302,36 @@ def parse_risultati(testo):
                     "gol_casa": gc, "gol_trasferta": gt,
                 })
                 i = j + 2
-                # SALTA eventuali numeri ORFANI extra (es. '2 2 2' malformato) che
-                # altrimenti disallineerebbero tutto il resto del programma
                 while i < n and is_int(righe[i]):
                     i += 1
                 continue
-            # squadre ripetute ma senza risultato valido: salta solo il blocco squadre
             i += 4
             continue
+        # blocco MALFORMATO: casa (NON ripetuta), trasf, trasf, [qualif], gol, gol
+        # (capita quando la fonte non ripete il nome della prima squadra)
+        if (i + 4 < n and righe[i] != righe[i + 1] and righe[i + 1] == righe[i + 2]
+                and not is_int(righe[i]) and not is_int(righe[i + 1])):
+            casa = righe[i]
+            trasf = righe[i + 1]
+            j = i + 3
+            qualif = None
+            if j < n and not is_int(righe[j]):
+                qualif = righe[j]
+                j += 1
+            if j + 1 < n and is_int(righe[j]) and is_int(righe[j + 1]):
+                gc = int(re.sub(r"\(.*?\)", "", righe[j]))
+                gt = int(re.sub(r"\(.*?\)", "", righe[j + 1]))
+                risultati.append({
+                    "competizione": label_competizione(comp_corr, naz_corr) or None,
+                    "nome_lungo": comp_corr, "nazione": naz_corr,
+                    "casa": casa, "trasferta": trasf,
+                    "qualificatore": qualif,
+                    "gol_casa": gc, "gol_trasferta": gt,
+                })
+                i = j + 2
+                while i < n and is_int(righe[i]):
+                    i += 1
+                continue
         # numero orfano isolato (residuo di blocchi malformati): saltalo, non è intestazione
         if is_int(righe[i]):
             i += 1
@@ -2997,15 +3094,25 @@ def pagina_estrattore_risultati(user):
         # 3) crea le partite NON TROVATE (auto-alimentazione), con la data selezionata
         nuove_partite = []
         if crea_mancanti and data_ris:
+            _amb_r = carica_squadre_ambigue()
             for idx, rrow in edit.iterrows():
                 m = meta[idx]
                 if m["id"]:
                     continue  # già agganciata
-                # crea la partita col risultato e la data scelta
+                _casa = m.get("casa_nome") or edit.iloc[idx]["Casa"]
+                _trasf = m.get("trasf_nome") or edit.iloc[idx]["Trasferta"]
+                # risolvi squadre ambigue: campionato nazionale -> aggiunge il paese in auto;
+                # coppa internazionale -> lascia il nome originale (lo sistemi dal Database)
+                _cr, _okc = risolvi_squadra_ambigua(_casa, m["competizione"], comp_df, _amb_r)
+                _tr, _okt = risolvi_squadra_ambigua(_trasf, m["competizione"], comp_df, _amb_r)
+                if _okc is True:
+                    _casa = _cr
+                if _okt is True:
+                    _trasf = _tr
                 nuove_partite.append({
                     "data": str(data_ris),
-                    "squadra_casa": m.get("casa_nome") or edit.iloc[idx]["Casa"],
-                    "squadra_trasferta": m.get("trasf_nome") or edit.iloc[idx]["Trasferta"],
+                    "squadra_casa": _casa,
+                    "squadra_trasferta": _trasf,
                     "gol_casa": m["gc"], "gol_trasferta": m["gt"],
                     "competizione": m["competizione"],
                     "tipo_partita": m["tipo"] or ND,
@@ -6085,6 +6192,62 @@ def pagina_diagnostica(user):
     le più lente, in una tabella copiabile. Strumento temporaneo per ottimizzare le perf."""
     import time as _time
     st.subheader("🔧 Diagnostica prestazioni")
+
+    # === PROFILER CONTINUO: registra ogni query/operazione mentre usi l'app ===
+    st.markdown("### 📊 Monitoraggio continuo (tutte le operazioni)")
+    st.caption("Registra automaticamente la durata di ogni query e operazione mentre usi "
+               "l'app. Usa il sistema normalmente (naviga, salva, genera), poi torna qui e "
+               "scarica l'Excel: lo storico riparte da zero a ogni download.")
+    _log = _prof_store()
+    if not _log:
+        st.info("Nessuna operazione registrata ancora. Usa l'app (naviga, salva, genera "
+                "pronostici…) poi torna qui: vedrai i tempi di ogni query e operazione.")
+    else:
+        _dfp = pd.DataFrame(_log)
+        # riepilogo: le operazioni più lente
+        _somm = (_dfp.groupby("operazione")
+                 .agg(chiamate=("ms", "count"), ms_totali=("ms", "sum"),
+                      ms_medi=("ms", "mean"), ms_max=("ms", "max"))
+                 .reset_index().sort_values("ms_totali", ascending=False))
+        _somm["ms_totali"] = _somm["ms_totali"].round(1)
+        _somm["ms_medi"] = _somm["ms_medi"].round(1)
+        _somm["ms_max"] = _somm["ms_max"].round(1)
+        st.markdown(f"**{len(_log)} operazioni registrate** · "
+                    f"tempo totale {_dfp['ms'].sum()/1000:.1f}s")
+        st.markdown("**Operazioni più lente (per tempo totale):**")
+        st.dataframe(_somm.head(15), use_container_width=True, hide_index=True)
+
+        _cexp1, _cexp2 = st.columns(2)
+        # export Excel completo (dettaglio + riepilogo), azzera lo storico
+        if _cexp1.button("📥 Scarica Excel e azzera storico", type="primary"):
+            import io as _io
+            _buf = _io.BytesIO()
+            try:
+                with pd.ExcelWriter(_buf, engine="openpyxl") as _wr:
+                    _dfp.to_excel(_wr, sheet_name="Dettaglio", index=False)
+                    _somm.to_excel(_wr, sheet_name="Riepilogo", index=False)
+                _buf.seek(0)
+                st.session_state["_profiler_export"] = _buf.getvalue()
+                st.session_state["_profiler_log"] = []   # azzera lo storico
+                st.success("Excel pronto qui sotto. Lo storico è stato azzerato.")
+            except Exception as e:
+                st.error(f"Errore nell'export: {e}")
+        if _cexp2.button("🗑️ Azzera storico (senza scaricare)"):
+            st.session_state["_profiler_log"] = []
+            st.rerun()
+
+        if st.session_state.get("_profiler_export"):
+            st.download_button(
+                "⬇️ Download profiling.xlsx",
+                data=st.session_state["_profiler_export"],
+                file_name=f"profiling_{datetime.now():%Y%m%d_%H%M}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+        with st.expander("Vedi tutte le operazioni (dettaglio cronologico)"):
+            st.dataframe(_dfp[::-1], use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("### 🔬 Test manuale (misura a comando)")
     st.caption("Misura la durata delle operazioni principali. Premi il pulsante, aspetta, "
                "poi copia la tabella. NB: la prima esecuzione paga la cache vuota.")
 
@@ -6341,26 +6504,31 @@ def main():
             st.session_state.pop("user", None)
             st.rerun()
 
-    if pagina.startswith("📥"):
-        pagina_estrattore(user)
-    elif pagina.startswith("📊"):
-        pagina_estrattore_risultati(user)
-    elif pagina.startswith("🗓️"):
-        pagina_estrattore_pianificazione(user)
-    elif pagina.startswith("🎛️"):
-        pagina_console_partite(user)
-    elif pagina.startswith("🔮"):
-        pagina_analisi(user)
-    elif pagina.startswith("📈"):
-        pagina_storico_pronostici(user)
-    elif pagina.startswith("🧪"):
-        pagina_backtest(user)
-    elif pagina.startswith("🗄️"):
-        pagina_database(user)
-    elif pagina.startswith("🔧"):
-        pagina_diagnostica(user)
+    _pagine_map = {
+        "📥": ("Estrattore ultimi risultati", pagina_estrattore),
+        "📊": ("Estrattore risultati", pagina_estrattore_risultati),
+        "🗓️": ("Estrattore pianificazione", pagina_estrattore_pianificazione),
+        "🎛️": ("Console partite", pagina_console_partite),
+        "🔮": ("Analisi & Pronostico", pagina_analisi),
+        "📈": ("Storico pronostici", pagina_storico_pronostici),
+        "🧪": ("Backtest", pagina_backtest),
+        "🗄️": ("Database", pagina_database),
+        "🔧": ("Diagnostica", pagina_diagnostica),
+    }
+    _fn = None
+    _nome_pag = None
+    for _pref, (_nm, _f) in _pagine_map.items():
+        if pagina.startswith(_pref):
+            _fn, _nome_pag = _f, _nm
+            break
+    if _fn is None:
+        _fn, _nome_pag = pagina_configurazione, "Configurazione"
+    # la Diagnostica NON si auto-profila (altrimenti falsa i numeri)
+    if _nome_pag == "Diagnostica":
+        _fn(user)
     else:
-        pagina_configurazione(user)
+        with profila(f"Pagina: {_nome_pag}", "pagina"):
+            _fn(user)
 
 
 if __name__ == "__main__":
