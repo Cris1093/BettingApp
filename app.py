@@ -1420,6 +1420,25 @@ def parse_risultati(testo):
                 while i < n and is_int(righe[i]):
                     i += 1
                 continue
+        # blocco MALFORMATO 2: casa, trasf, gol, gol (ENTRAMBE non ripetute).
+        # Riconosciuto SOLO se seguono esattamente due numeri (altrimenti sarebbe
+        # un'intestazione competizione): casa e trasf non-numeri, poi 2 interi.
+        if (i + 3 < n and not is_int(righe[i]) and not is_int(righe[i + 1])
+                and is_int(righe[i + 2]) and is_int(righe[i + 3])
+                and righe[i] != righe[i + 1]):
+            gc = int(re.sub(r"\(.*?\)", "", righe[i + 2]))
+            gt = int(re.sub(r"\(.*?\)", "", righe[i + 3]))
+            risultati.append({
+                "competizione": label_competizione(comp_corr, naz_corr) or None,
+                "nome_lungo": comp_corr, "nazione": naz_corr,
+                "casa": righe[i], "trasferta": righe[i + 1],
+                "qualificatore": None,
+                "gol_casa": gc, "gol_trasferta": gt,
+            })
+            i = i + 4
+            while i < n and is_int(righe[i]):
+                i += 1
+            continue
         # numero orfano isolato (residuo di blocchi malformati): saltalo, non è intestazione
         if is_int(righe[i]):
             i += 1
