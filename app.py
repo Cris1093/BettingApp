@@ -1088,6 +1088,30 @@ def categoria_di(codice_o_label, comp_df):
 ND = "ND"  # categoria/tipo non determinabile
 
 
+def risolvi_squadra_ambigua(nome, competizione, comp_df, squadre_amb=None):
+    """Se 'nome' è una squadra ambigua (registrata), restituisce il nome corretto col paese
+    in base alla nazione del campionato. Ritorna:
+    - (nome_risolto, True) se risolta automaticamente (campionato nazionale)
+    - (nome, False) se NON ambigua (nessun cambiamento)
+    - (None, 'scegli') se ambigua ma in coppa internazionale (serve scelta manuale)."""
+    if squadre_amb is None:
+        squadre_amb = carica_squadre_ambigue()
+    k = _key(_norm_squadra(nome))
+    info = squadre_amb.get(k)
+    if not info:
+        return (nome, False)   # non ambigua
+    naz = _nazione_di(competizione, comp_df)
+    _non_paesi = {"europa", "asia", "africa", "sud america", "sudamerica", "nord america",
+                  "nord e centro america", "centro america", "oceania", "mondo",
+                  "australia e oceania", "internazionale", "world", "conmebol", "concacaf",
+                  "uefa", "afc", "caf", "fifa"}
+    if naz and _key(naz) not in _non_paesi:
+        # campionato nazionale: risolvi automaticamente col paese
+        return (f"{info['nome']} ({naz.upper()})", True)
+    # coppa internazionale o nazione ignota: serve la scelta manuale
+    return (None, "scegli")
+
+
 def _nazione_di(codice_o_label, comp_df):
     """Data una competizione, restituisce la nazione dell'anagrafica (es. 'ITALIA'), o None.
     Serve a distinguere squadre omonime in base al paese del campionato che giocano."""
@@ -2368,12 +2392,19 @@ def pagina_database(user):
                              key="om_separa"):
                     _cli = get_client()
                     _agg = 0
-                    for _, p in df.iterrows():
-                        naz = _nazione_di(p.get("competizione"), comp_df_om)
-                        # solo campionati nazionali (naz è un paese, già filtrato sopra)
-                        if not naz or _key(naz) in _non_paesi:
-                            continue
-                        if naz not in nazioni:
+                    # mappa competizione(chiave) -> nazione, precalcolata UNA volta (evita di
+                    # chiamare _nazione_di per ogni partita = migliaia di scansioni)
+                    _naz_map = {}
+                    for _, c in comp_df_om.iterrows():
+                        na = _txt(c.get("nazione"))
+                        for kk in _chiavi_competizione(c):
+                            _naz_map[kk] = na
+                    # filtra SOLO le partite di questa squadra (poche), non tutto il df
+                    _mine = df[(df["squadra_casa"] == _scelta_sq) |
+                               (df["squadra_trasferta"] == _scelta_sq)]
+                    for _, p in _mine.iterrows():
+                        naz = _naz_map.get(_key(_txt(p.get("competizione"))))
+                        if not naz or _key(naz) in _non_paesi or naz not in nazioni:
                             continue
                         nuovo = f"{_scelta_sq} ({naz})"
                         _upd = {}
@@ -2387,7 +2418,6 @@ def pagina_database(user):
                                 _agg += 1
                             except Exception:
                                 pass
-                    # registra come ambigua (per la gestione futura)
                     salva_squadra_ambigua(_scelta_sq, nazioni)
                     _invalida_partite()
                     st.success(f"Separate {_agg} partite di campionato (una versione per paese) "
@@ -3127,6 +3157,31 @@ def pagina_estrattore_pianificazione(user):
             for lbl, nl, na in nuove:
                 st.text(f"nome_lungo={nl!r}  |  nazione={na!r}")
 
+    # === SCELTA squadre ambigue in coppa internazionale (Tappa 4) ===
+    # prima del pulsante di creazione, se ci sono squadre ambigue in competizioni dove il
+    # paese non è deducibile, mostra un selettore per ognuna così scegli il paese corretto.
+    _amb_p = carica_squadre_ambigue()
+    _scelte_amb = {}   # (squadra_originale) -> nome scelto col paese
+    if _amb_p:
+        _ambigue_in_coppa = []
+        for idx, rrow in edit.iterrows():
+            if not rrow.get("Crea") or not rrow.get("Casa") or not rrow.get("Trasferta"):
+                continue
+            _comp = meta[idx]["competizione"]
+            for _sq in (rrow["Casa"], rrow["Trasferta"]):
+                _res, _ok = risolvi_squadra_ambigua(_sq, _comp, comp_df, _amb_p)
+                if _ok == "scegli":
+                    _info = _amb_p.get(_key(_norm_squadra(_sq)))
+                    if _info and _sq not in [x[0] for x in _ambigue_in_coppa]:
+                        _ambigue_in_coppa.append((_sq, _info["nazioni"]))
+        if _ambigue_in_coppa:
+            st.markdown("**🔀 Squadre ambigue in competizione internazionale** — scegli il paese:")
+            for _sq, _nazioni in _ambigue_in_coppa:
+                _opzioni = [f"{_sq} ({n})" for n in _nazioni] + [f"{_sq} (lascia così)"]
+                _sel = st.selectbox(f"«{_sq}» in questa competizione è:", _opzioni,
+                                    key=f"amb_scelta_{_key(_sq)}")
+                _scelte_amb[_sq] = _sq if _sel.endswith("(lascia così)") else _sel
+
     if st.button("💾 Crea partite da compilare", type="primary"):
         if nuove:
             upsert_competizioni([
@@ -3134,14 +3189,23 @@ def pagina_estrattore_pianificazione(user):
                 for _, nl, na in nuove
             ])
         records = []
+        _amb = carica_squadre_ambigue()
         for idx, rrow in edit.iterrows():
             if not rrow["Crea"] or not rrow["Casa"] or not rrow["Trasferta"]:
                 continue
+            _comp = meta[idx]["competizione"]
+            casa_r, _ok_c = risolvi_squadra_ambigua(rrow["Casa"], _comp, comp_df, _amb)
+            trasf_r, _ok_t = risolvi_squadra_ambigua(rrow["Trasferta"], _comp, comp_df, _amb)
+            # coppa internazionale: usa la scelta manuale fatta sopra (Tappa 4)
+            if _ok_c == "scegli":
+                casa_r = _scelte_amb.get(rrow["Casa"], rrow["Casa"])
+            if _ok_t == "scegli":
+                trasf_r = _scelte_amb.get(rrow["Trasferta"], rrow["Trasferta"])
             records.append({
                 "data": str(data_batch),
                 "ora": rrow["Ora"] or None,
-                "squadra_casa": rrow["Casa"],
-                "squadra_trasferta": rrow["Trasferta"],
+                "squadra_casa": casa_r,
+                "squadra_trasferta": trasf_r,
                 "competizione": meta[idx]["competizione"],
                 "tipo_partita": meta[idx]["cat"],   # categoria o 'ND'
                 "da_compilare": True,
