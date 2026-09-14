@@ -61,7 +61,64 @@ def get_client():
         key = st.secrets["supabase"]["key"]
     except Exception:
         return None
-    return create_client(url, key)
+    client = create_client(url, key)
+    _installa_profiler_query(client)
+    return client
+
+
+def _installa_profiler_query(client):
+    """Avvolge il metodo execute() delle query Supabase per cronometrare OGNI query
+    (select/insert/update/delete) con tabella e tipo. Fatto una volta sola sul client."""
+    import time as _t
+    try:
+        # il query builder di supabase-py: intercetto execute() sulla sua classe
+        _q = client.table("partite").select("id").limit(1)
+        _cls = type(_q)
+        if getattr(_cls, "_prof_patched", False):
+            return
+        _orig_execute = _cls.execute
+
+        def _execute_profilato(self, *a, **kw):
+            # ricava tabella e tipo di operazione dall'oggetto query (robusto a versioni diverse)
+            _tab = "?"
+            _method = "?"
+            for _attr in ("table_name", "_table", "path"):
+                _v = getattr(self, _attr, None)
+                if _v:
+                    _tab = str(_v).strip("/").split("?")[0]
+                    break
+            # il metodo HTTP indica il tipo: GET=select, POST=insert, PATCH=update, DELETE=delete
+            for _attr in ("_method", "http_method", "method"):
+                _v = getattr(self, _attr, None)
+                if _v:
+                    _method = str(_v)
+                    break
+            _map = {"GET": "SELECT", "POST": "INSERT", "PATCH": "UPDATE",
+                    "DELETE": "DELETE", "PUT": "UPSERT"}
+            _method = _map.get(_method.upper(), _method)
+            _t0 = _t.perf_counter()
+            _err = ""
+            try:
+                return _orig_execute(self, *a, **kw)
+            except Exception as e:
+                _err = str(e)[:80]
+                raise
+            finally:
+                _dt = (_t.perf_counter() - _t0) * 1000
+                try:
+                    _prof_store().append({
+                        "quando": datetime.now().strftime("%H:%M:%S"),
+                        "categoria": "query DB",
+                        "operazione": f"{_method} {_tab}",
+                        "ms": round(_dt, 1), "errore": _err,
+                    })
+                except Exception:
+                    pass
+
+        _cls.execute = _execute_profilato
+        _cls._prof_patched = True
+    except Exception:
+        pass   # se l'interno di supabase-py cambia, non blocchiamo l'app
 
 
 # ============================================================================
@@ -1185,6 +1242,37 @@ def risolvi_squadra_ambigua(nome, competizione, comp_df, squadre_amb=None):
         return (f"{info['nome']} ({naz.upper()})", True)
     # coppa internazionale o nazione ignota: serve la scelta manuale
     return (None, "scegli")
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _rileva_squadre_omonime():
+    """Ritorna {nome_squadra: {nazioni}} per le squadre che giocano in campionati di PAESI
+    diversi (vere omonime). In cache e ottimizzato: mappa comp->nazione precalcolata, niente
+    _nazione_di per riga (era la causa dei ~20s nella pagina Database)."""
+    df = carica_partite()
+    comp_df = carica_competizioni()
+    if df.empty or comp_df.empty:
+        return {}
+    _non_paesi = {"europa", "asia", "africa", "sud america", "sudamerica", "nord america",
+                  "nord e centro america", "centro america", "oceania", "mondo",
+                  "australia e oceania", "internazionale", "world", "conmebol", "concacaf",
+                  "uefa", "afc", "caf", "fifa"}
+    # mappa competizione(chiave) -> nazione, UNA volta
+    naz_map = {}
+    for _, c in comp_df.iterrows():
+        na = _txt(c.get("nazione"))
+        for kk in _chiavi_competizione(c):
+            naz_map[kk] = na
+    naz_per_squadra = {}
+    for _, p in df.iterrows():
+        na = naz_map.get(_key(_txt(p.get("competizione"))))
+        if not na or _key(na) in _non_paesi:
+            continue
+        for col in ("squadra_casa", "squadra_trasferta"):
+            sq = _txt(p.get(col))
+            if sq:
+                naz_per_squadra.setdefault(sq, set()).add(na)
+    return {sq: nz for sq, nz in naz_per_squadra.items() if len(nz) > 1}
 
 
 def _nazione_di(codice_o_label, comp_df):
@@ -2349,58 +2437,63 @@ def pagina_database(user):
         st.caption("Trova le partite DUPLICATE (stessa data + squadra casa + squadra trasferta "
                    "+ stesso risultato) e ne tiene una sola. Non cancella partite diverse: solo "
                    "copie identiche. Mostra l'anteprima prima di rimuovere.")
-        # trova i duplicati: chiave = data + casa_norm + trasf_norm + risultato
-        _dupmap = {}
-        for _, p in df.iterrows():
-            gc, gt = p.get("gol_casa"), p.get("gol_trasferta")
-            ris = (f"{int(gc)}-{int(gt)}" if (_num_ok(gc) and _num_ok(gt)) else "NA")
-            k = (str(p.get("data"))[:10],
-                 _key(_norm_squadra(p.get("squadra_casa"))),
-                 _key(_norm_squadra(p.get("squadra_trasferta"))),
-                 ris)
-            _dupmap.setdefault(k, []).append(p)
-        # gruppi con più di 1 partita = duplicati
-        gruppi_dup = {k: v for k, v in _dupmap.items() if len(v) > 1}
-        n_extra = sum(len(v) - 1 for v in gruppi_dup.values())  # copie da rimuovere
-        if not gruppi_dup:
-            st.success("Nessun duplicato trovato: lo storico è pulito. 👍")
-        else:
-            st.warning(f"Trovati **{len(gruppi_dup)} gruppi** di partite duplicate, "
-                       f"per un totale di **{n_extra} copie** da rimuovere.")
-            # anteprima primi 15 gruppi
-            _ant = []
-            for k, v in list(gruppi_dup.items())[:15]:
-                p0 = v[0]
-                _ant.append(f"{p0.get('squadra_casa')} - {p0.get('squadra_trasferta')} "
-                            f"({k[0]}) {k[3]}  ×{len(v)}")
-            st.text("\n".join(_ant))
-            if len(gruppi_dup) > 15:
-                st.caption(f"…e altri {len(gruppi_dup) - 15} gruppi.")
-            st.caption("Rimuovendo, per ogni gruppo si tiene la partita con più informazioni "
-                       "(quote/target) e si cancellano le copie identiche.")
-            if st.button("🧹 Rimuovi i duplicati", type="primary"):
-                _cli = get_client()
-                rimossi = 0
-                for k, v in gruppi_dup.items():
-                    # tieni quella "migliore": priorità a is_target, poi a chi ha quote/id
-                    def _punteggio(p):
-                        s = 0
-                        if p.get("is_target") is True:
-                            s += 100
-                        if _num_ok(p.get("quota_iniziale_1")):
-                            s += 10
-                        return s
-                    v_ord = sorted(v, key=_punteggio, reverse=True)
-                    tieni = v_ord[0]
-                    for p in v_ord[1:]:
-                        try:
-                            _cli.table("partite").delete().eq("id", p.get("id")).execute()
-                            rimossi += 1
-                        except Exception:
-                            pass
-                _invalida_partite()
-                st.success(f"Rimossi {rimossi} duplicati. Lo storico è più pulito.")
+        if not st.session_state.get("_calc_duplicati"):
+            if st.button("🔍 Cerca duplicati"):
+                st.session_state["_calc_duplicati"] = True
                 st.rerun()
+        else:
+            # trova i duplicati: chiave = data + casa_norm + trasf_norm + risultato
+            _dupmap = {}
+            for _, p in df.iterrows():
+                gc, gt = p.get("gol_casa"), p.get("gol_trasferta")
+                ris = (f"{int(gc)}-{int(gt)}" if (_num_ok(gc) and _num_ok(gt)) else "NA")
+                k = (str(p.get("data"))[:10],
+                     _key(_norm_squadra(p.get("squadra_casa"))),
+                     _key(_norm_squadra(p.get("squadra_trasferta"))),
+                     ris)
+                _dupmap.setdefault(k, []).append(p)
+            # gruppi con più di 1 partita = duplicati
+            gruppi_dup = {k: v for k, v in _dupmap.items() if len(v) > 1}
+            n_extra = sum(len(v) - 1 for v in gruppi_dup.values())  # copie da rimuovere
+            if not gruppi_dup:
+                st.success("Nessun duplicato trovato: lo storico è pulito. 👍")
+            else:
+                st.warning(f"Trovati **{len(gruppi_dup)} gruppi** di partite duplicate, "
+                           f"per un totale di **{n_extra} copie** da rimuovere.")
+                # anteprima primi 15 gruppi
+                _ant = []
+                for k, v in list(gruppi_dup.items())[:15]:
+                    p0 = v[0]
+                    _ant.append(f"{p0.get('squadra_casa')} - {p0.get('squadra_trasferta')} "
+                                f"({k[0]}) {k[3]}  ×{len(v)}")
+                st.text("\n".join(_ant))
+                if len(gruppi_dup) > 15:
+                    st.caption(f"…e altri {len(gruppi_dup) - 15} gruppi.")
+                st.caption("Rimuovendo, per ogni gruppo si tiene la partita con più informazioni "
+                           "(quote/target) e si cancellano le copie identiche.")
+                if st.button("🧹 Rimuovi i duplicati", type="primary"):
+                    _cli = get_client()
+                    rimossi = 0
+                    for k, v in gruppi_dup.items():
+                        # tieni quella "migliore": priorità a is_target, poi a chi ha quote/id
+                        def _punteggio(p):
+                            s = 0
+                            if p.get("is_target") is True:
+                                s += 100
+                            if _num_ok(p.get("quota_iniziale_1")):
+                                s += 10
+                            return s
+                        v_ord = sorted(v, key=_punteggio, reverse=True)
+                        tieni = v_ord[0]
+                        for p in v_ord[1:]:
+                            try:
+                                _cli.table("partite").delete().eq("id", p.get("id")).execute()
+                                rimossi += 1
+                            except Exception:
+                                pass
+                    _invalida_partite()
+                    st.success(f"Rimossi {rimossi} duplicati. Lo storico è più pulito.")
+                    st.rerun()
 
     # === ISPETTORE STORICO PER SQUADRA (per trovare duplicati mascherati) ===
     with st.expander("🔎 Ispeziona lo storico di una squadra"):
@@ -2448,81 +2541,74 @@ def pagina_database(user):
                    "diverse (es. 'San Antonio' in Ecuador e in USA). Sono squadre DIVERSE che "
                    "il sistema tratta come una sola. Rinominane una per separarle (es. aggiungi "
                    "il paese), aggiornando tutte le sue partite di quella nazione.")
-        comp_df_om = carica_competizioni()
-        # nazioni "non-paese" = competizioni internazionali/continentali: NON identificano il
-        # paese della squadra, quindi vanno IGNORATE nel rilevamento omonime (una squadra che
-        # gioca il suo campionato + una coppa internazionale NON è una squadra diversa!)
-        _non_paesi = {"europa", "asia", "africa", "sud america", "sudamerica", "nord america",
-                      "nord e centro america", "centro america", "oceania", "mondo",
-                      "australia e oceania", "internazionale", "world", "conmebol", "concacaf",
-                      "uefa", "afc", "caf", "fifa"}
-        # per ogni squadra, raccoglie SOLO le nazioni-paese dei campionati in cui compare
-        naz_per_squadra = {}
-        for _, p in df.iterrows():
-            naz = _nazione_di(p.get("competizione"), comp_df_om)
-            if not naz or _key(naz) in _non_paesi:
-                continue   # ignora competizioni internazionali/continentali
-            for col in ("squadra_casa", "squadra_trasferta"):
-                sq = _txt(p.get(col))
-                if sq:
-                    naz_per_squadra.setdefault(sq, set()).add(naz)
-        # VERE omonime = stesso nome in >1 PAESE diverso (non conta le coppe internazionali)
-        ambigue = {sq: nz for sq, nz in naz_per_squadra.items() if len(nz) > 1}
-        if not ambigue:
-            st.success("Nessuna squadra omonima reale rilevata (nessun nome gioca in "
-                       "campionati nazionali di paesi diversi). 👍")
+        if not st.session_state.get("_calc_omonime"):
+            if st.button("🔍 Rileva squadre omonime"):
+                st.session_state["_calc_omonime"] = True
+                st.rerun()
+            ambigue = None
         else:
-            st.warning(f"Trovate **{len(ambigue)} squadre** che giocano in campionati di "
-                       "paesi diversi (vere omonime da separare):")
-            _amb_esist = carica_squadre_ambigue()
-            _scelta_sq = st.selectbox("Squadra da separare",
-                                      sorted(ambigue.keys()), key="om_squadra")
-            if _scelta_sq:
-                nazioni = sorted(ambigue[_scelta_sq])
-                _gia = _key(_norm_squadra(_scelta_sq)) in _amb_esist
-                st.caption(f"«{_scelta_sq}» compare nei campionati di: {', '.join(nazioni)}"
-                           + ("  ·  ✅ già registrata come ambigua" if _gia else ""))
-                st.markdown("**Sistemazione retroattiva:** rinomina le partite di CAMPIONATO "
-                            "(non le coppe internazionali) aggiungendo il paese, e registra la "
-                            "squadra come ambigua (così le future partite verranno gestite).")
-                if st.button("✏️ Separa e registra come ambigua", type="primary",
-                             key="om_separa"):
-                    _cli = get_client()
-                    _agg = 0
-                    # mappa competizione(chiave) -> nazione, precalcolata UNA volta (evita di
-                    # chiamare _nazione_di per ogni partita = migliaia di scansioni)
-                    _naz_map = {}
-                    for _, c in comp_df_om.iterrows():
-                        na = _txt(c.get("nazione"))
-                        for kk in _chiavi_competizione(c):
-                            _naz_map[kk] = na
-                    # filtra SOLO le partite di questa squadra (poche), non tutto il df
-                    _mine = df[(df["squadra_casa"] == _scelta_sq) |
-                               (df["squadra_trasferta"] == _scelta_sq)]
-                    for _, p in _mine.iterrows():
-                        naz = _naz_map.get(_key(_txt(p.get("competizione"))))
-                        if not naz or _key(naz) in _non_paesi or naz not in nazioni:
-                            continue
-                        nuovo = f"{_scelta_sq} ({naz})"
-                        _upd = {}
-                        if _txt(p.get("squadra_casa")) == _scelta_sq:
-                            _upd["squadra_casa"] = nuovo
-                        if _txt(p.get("squadra_trasferta")) == _scelta_sq:
-                            _upd["squadra_trasferta"] = nuovo
-                        if _upd:
-                            try:
-                                _cli.table("partite").update(_upd).eq("id", p.get("id")).execute()
-                                _agg += 1
-                            except Exception:
-                                pass
-                    salva_squadra_ambigua(_scelta_sq, nazioni)
-                    _invalida_partite()
-                    st.success(f"Separate {_agg} partite di campionato (una versione per paese) "
-                               f"e «{_scelta_sq}» registrata come ambigua. Le partite di coppa "
-                               "internazionale restano col nome originale: assegnale a mano.")
-                    st.rerun()
-                st.caption("⚠️ Le partite di coppa internazionale (nazione neutra) NON vengono "
-                           "toccate: restano «" + _scelta_sq + "» e le assegnerai manualmente.")
+            comp_df_om = carica_competizioni()
+            ambigue = _rileva_squadre_omonime()
+            _non_paesi = {"europa", "asia", "africa", "sud america", "sudamerica", "nord america",
+                          "nord e centro america", "centro america", "oceania", "mondo",
+                          "australia e oceania", "internazionale", "world", "conmebol", "concacaf",
+                          "uefa", "afc", "caf", "fifa"}
+        if ambigue is not None:
+            if not ambigue:
+                st.success("Nessuna squadra omonima reale rilevata (nessun nome gioca in "
+                           "campionati nazionali di paesi diversi). 👍")
+            else:
+                st.warning(f"Trovate **{len(ambigue)} squadre** che giocano in campionati di "
+                           "paesi diversi (vere omonime da separare):")
+                _amb_esist = carica_squadre_ambigue()
+                _scelta_sq = st.selectbox("Squadra da separare",
+                                          sorted(ambigue.keys()), key="om_squadra")
+                if _scelta_sq:
+                    nazioni = sorted(ambigue[_scelta_sq])
+                    _gia = _key(_norm_squadra(_scelta_sq)) in _amb_esist
+                    st.caption(f"«{_scelta_sq}» compare nei campionati di: {', '.join(nazioni)}"
+                               + ("  ·  ✅ già registrata come ambigua" if _gia else ""))
+                    st.markdown("**Sistemazione retroattiva:** rinomina le partite di CAMPIONATO "
+                                "(non le coppe internazionali) aggiungendo il paese, e registra la "
+                                "squadra come ambigua (così le future partite verranno gestite).")
+                    if st.button("✏️ Separa e registra come ambigua", type="primary",
+                                 key="om_separa"):
+                        _cli = get_client()
+                        _agg = 0
+                        # mappa competizione(chiave) -> nazione, precalcolata UNA volta (evita di
+                        # chiamare _nazione_di per ogni partita = migliaia di scansioni)
+                        _naz_map = {}
+                        for _, c in comp_df_om.iterrows():
+                            na = _txt(c.get("nazione"))
+                            for kk in _chiavi_competizione(c):
+                                _naz_map[kk] = na
+                        # filtra SOLO le partite di questa squadra (poche), non tutto il df
+                        _mine = df[(df["squadra_casa"] == _scelta_sq) |
+                                   (df["squadra_trasferta"] == _scelta_sq)]
+                        for _, p in _mine.iterrows():
+                            naz = _naz_map.get(_key(_txt(p.get("competizione"))))
+                            if not naz or _key(naz) in _non_paesi or naz not in nazioni:
+                                continue
+                            nuovo = f"{_scelta_sq} ({naz})"
+                            _upd = {}
+                            if _txt(p.get("squadra_casa")) == _scelta_sq:
+                                _upd["squadra_casa"] = nuovo
+                            if _txt(p.get("squadra_trasferta")) == _scelta_sq:
+                                _upd["squadra_trasferta"] = nuovo
+                            if _upd:
+                                try:
+                                    _cli.table("partite").update(_upd).eq("id", p.get("id")).execute()
+                                    _agg += 1
+                                except Exception:
+                                    pass
+                        salva_squadra_ambigua(_scelta_sq, nazioni)
+                        _invalida_partite()
+                        st.success(f"Separate {_agg} partite di campionato (una versione per paese) "
+                                   f"e «{_scelta_sq}» registrata come ambigua. Le partite di coppa "
+                                   "internazionale restano col nome originale: assegnale a mano.")
+                        st.rerun()
+                    st.caption("⚠️ Le partite di coppa internazionale (nazione neutra) NON vengono "
+                               "toccate: restano «" + _scelta_sq + "» e le assegnerai manualmente.")
 
     # === SQUADRE OMONIME - fine ===
     # --- Partite da compilare ---
