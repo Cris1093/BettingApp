@@ -534,6 +534,59 @@ CATEGORIE = ["Non assegnata", "Campionato", "Playoff", "Coppa nazionale",
 
 
 @st.cache_data(ttl=600, show_spinner=False)
+def carica_squadre_ambigue():
+    """Ritorna {nome_base_normalizzato: {'nome': str, 'nazioni': [..], 'id': str}}."""
+    cli = get_client()
+    if not cli:
+        return {}
+    try:
+        rows = cli.table("squadre_ambigue").select("*").execute().data or []
+    except Exception:
+        return {}
+    out = {}
+    for r in rows:
+        nome = _txt(r.get("nome_base"))
+        if not nome:
+            continue
+        nazioni = [n.strip() for n in _txt(r.get("nazioni")).split(",") if n.strip()]
+        out[_key(_norm_squadra(nome))] = {"nome": nome, "nazioni": nazioni, "id": r.get("id")}
+    return out
+
+
+def salva_squadra_ambigua(nome, nazioni):
+    """Aggiunge/aggiorna una squadra ambigua (nazioni = lista)."""
+    cli = get_client()
+    if not cli:
+        return
+    rec = {"nome_base": nome.strip(),
+           "nazioni": ",".join(n.strip().upper() for n in nazioni if n.strip())}
+    # una riga per nome
+    try:
+        ex = cli.table("squadre_ambigue").select("id").ilike("nome_base", nome.strip()).execute()
+        if ex.data:
+            cli.table("squadre_ambigue").update(rec).eq("id", ex.data[0]["id"]).execute()
+        else:
+            cli.table("squadre_ambigue").insert(rec).execute()
+    except Exception:
+        pass
+    try:
+        carica_squadre_ambigue.clear()
+    except Exception:
+        st.cache_data.clear()
+
+
+def elimina_squadra_ambigua(sid):
+    cli = get_client()
+    if not cli:
+        return
+    try:
+        cli.table("squadre_ambigue").delete().eq("id", sid).execute()
+        carica_squadre_ambigue.clear()
+    except Exception:
+        st.cache_data.clear()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
 def carica_competizioni():
     cli = get_client()
     if not cli:
@@ -2298,43 +2351,51 @@ def pagina_database(user):
             st.success("Nessuna squadra omonima reale rilevata (nessun nome gioca in "
                        "campionati nazionali di paesi diversi). 👍")
         else:
-            st.warning(f"Trovate **{len(ambigue)} squadre** che giocano in più nazioni "
-                       "(potenziali omonime da separare):")
+            st.warning(f"Trovate **{len(ambigue)} squadre** che giocano in campionati di "
+                       "paesi diversi (vere omonime da separare):")
+            _amb_esist = carica_squadre_ambigue()
             _scelta_sq = st.selectbox("Squadra da separare",
                                       sorted(ambigue.keys()), key="om_squadra")
             if _scelta_sq:
                 nazioni = sorted(ambigue[_scelta_sq])
-                st.caption(f"«{_scelta_sq}» compare in: {', '.join(nazioni)}")
-                st.markdown("**Rinomina le partite di questa squadra giocate in una nazione:**")
-                col1, col2 = st.columns(2)
-                naz_sel = col1.selectbox("Nazione da isolare", nazioni, key="om_naz")
-                nuovo_nome = col2.text_input("Nuovo nome per questa squadra",
-                                             value=f"{_scelta_sq} ({naz_sel})", key="om_nuovo")
-                if st.button("✏️ Rinomina le partite di questa nazione", type="primary"):
+                _gia = _key(_norm_squadra(_scelta_sq)) in _amb_esist
+                st.caption(f"«{_scelta_sq}» compare nei campionati di: {', '.join(nazioni)}"
+                           + ("  ·  ✅ già registrata come ambigua" if _gia else ""))
+                st.markdown("**Sistemazione retroattiva:** rinomina le partite di CAMPIONATO "
+                            "(non le coppe internazionali) aggiungendo il paese, e registra la "
+                            "squadra come ambigua (così le future partite verranno gestite).")
+                if st.button("✏️ Separa e registra come ambigua", type="primary",
+                             key="om_separa"):
                     _cli = get_client()
                     _agg = 0
                     for _, p in df.iterrows():
                         naz = _nazione_di(p.get("competizione"), comp_df_om)
-                        if naz != naz_sel:
+                        # solo campionati nazionali (naz è un paese, già filtrato sopra)
+                        if not naz or _key(naz) in _non_paesi:
                             continue
+                        if naz not in nazioni:
+                            continue
+                        nuovo = f"{_scelta_sq} ({naz})"
                         _upd = {}
                         if _txt(p.get("squadra_casa")) == _scelta_sq:
-                            _upd["squadra_casa"] = nuovo_nome
+                            _upd["squadra_casa"] = nuovo
                         if _txt(p.get("squadra_trasferta")) == _scelta_sq:
-                            _upd["squadra_trasferta"] = nuovo_nome
+                            _upd["squadra_trasferta"] = nuovo
                         if _upd:
                             try:
                                 _cli.table("partite").update(_upd).eq("id", p.get("id")).execute()
                                 _agg += 1
                             except Exception:
                                 pass
+                    # registra come ambigua (per la gestione futura)
+                    salva_squadra_ambigua(_scelta_sq, nazioni)
                     _invalida_partite()
-                    st.success(f"Rinominate {_agg} partite: «{_scelta_sq}» → «{nuovo_nome}» "
-                               f"(nazione {naz_sel}). Ora è una squadra distinta.")
+                    st.success(f"Separate {_agg} partite di campionato (una versione per paese) "
+                               f"e «{_scelta_sq}» registrata come ambigua. Le partite di coppa "
+                               "internazionale restano col nome originale: assegnale a mano.")
                     st.rerun()
-                st.caption("⚠️ Le coppe internazionali (nazione neutra tipo 'Mondo') non "
-                           "vengono toccate: quelle partite restano col nome originale e le "
-                           "aggancerai manualmente alla squadra giusta quando serve.")
+                st.caption("⚠️ Le partite di coppa internazionale (nazione neutra) NON vengono "
+                           "toccate: restano «" + _scelta_sq + "» e le assegnerai manualmente.")
 
     # === SQUADRE OMONIME - fine ===
     # --- Partite da compilare ---
