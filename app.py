@@ -1395,6 +1395,24 @@ def parse_risultati(testo):
                 continue
             i += 4
             continue
+        # blocco con NUMERO ORFANO tra casa e trasferta: casa,casa,[num],trasf,trasf,gol,gol
+        # (es. "Moreirense U23, Moreirense U23, 2, Braga U23, Braga U23, 1, 1")
+        if (i + 6 < n and righe[i] == righe[i + 1] and is_int(righe[i + 2])
+                and righe[i + 3] == righe[i + 4]
+                and is_int(righe[i + 5]) and is_int(righe[i + 6])):
+            gc = int(re.sub(r"\(.*?\)", "", righe[i + 5]))
+            gt = int(re.sub(r"\(.*?\)", "", righe[i + 6]))
+            risultati.append({
+                "competizione": label_competizione(comp_corr, naz_corr) or None,
+                "nome_lungo": comp_corr, "nazione": naz_corr,
+                "casa": righe[i], "trasferta": righe[i + 3],
+                "qualificatore": None,
+                "gol_casa": gc, "gol_trasferta": gt,
+            })
+            i = i + 7
+            while i < n and is_int(righe[i]):
+                i += 1
+            continue
         # blocco MALFORMATO: casa (NON ripetuta), trasf, trasf, [qualif], gol, gol
         # (capita quando la fonte non ripete il nome della prima squadra)
         if (i + 4 < n and righe[i] != righe[i + 1] and righe[i + 1] == righe[i + 2]
