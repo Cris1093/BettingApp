@@ -2479,40 +2479,68 @@ def pagina_database(user):
                 st.session_state["_calc_duplicati"] = True
                 st.rerun()
         else:
-            # trova i duplicati: chiave = data + casa_norm + trasf_norm + risultato
-            _dupmap = {}
+            # trova i duplicati: stesse squadre + stesso risultato, con date che distano
+            # AL MASSIMO 2 giorni (oltre = partite diverse, es. andata/ritorno).
+            # 1) raggruppa per (casa, trasf, risultato) SENZA data
+            _bysquadre = {}
             for _, p in df.iterrows():
                 gc, gt = p.get("gol_casa"), p.get("gol_trasferta")
                 ris = (f"{int(gc)}-{int(gt)}" if (_num_ok(gc) and _num_ok(gt)) else "NA")
-                k = (str(p.get("data"))[:10],
-                     _key(_norm_squadra(p.get("squadra_casa"))),
-                     _key(_norm_squadra(p.get("squadra_trasferta"))),
-                     ris)
-                _dupmap.setdefault(k, []).append(p)
-            # gruppi con più di 1 partita = duplicati
-            gruppi_dup = {k: v for k, v in _dupmap.items() if len(v) > 1}
+                kk = (_key(_norm_squadra(p.get("squadra_casa"))),
+                      _key(_norm_squadra(p.get("squadra_trasferta"))),
+                      ris)
+                _bysquadre.setdefault(kk, []).append(p)
+            # 2) dentro ogni gruppo, agglomera le partite vicine nel tempo (<=2 giorni)
+            from datetime import timedelta as _td2
+            gruppi_dup = {}
+            _gid = 0
+            for kk, plist in _bysquadre.items():
+                if len(plist) < 2:
+                    continue
+                # ordina per data
+                _pl = sorted(plist, key=lambda x: str(x.get("data"))[:10])
+                _dates = [pd.to_datetime(str(x.get("data"))[:10], errors="coerce") for x in _pl]
+                usato = [False] * len(_pl)
+                for a in range(len(_pl)):
+                    if usato[a]:
+                        continue
+                    cluster = [_pl[a]]
+                    usato[a] = True
+                    for b in range(a + 1, len(_pl)):
+                        if usato[b]:
+                            continue
+                        if _dates[a] is not None and _dates[b] is not None and \
+                                abs((_dates[b] - _dates[a]).days) <= 2:
+                            cluster.append(_pl[b])
+                            usato[b] = True
+                    if len(cluster) > 1:
+                        gruppi_dup[(kk, _gid)] = cluster
+                        _gid += 1
             n_extra = sum(len(v) - 1 for v in gruppi_dup.values())  # copie da rimuovere
             if not gruppi_dup:
-                st.success("Nessun duplicato trovato: lo storico è pulito. 👍")
+                st.success("Nessun duplicato trovato (stesse squadre, stesso risultato, "
+                           "entro 2 giorni). Lo storico è pulito. 👍")
             else:
-                st.warning(f"Trovati **{len(gruppi_dup)} gruppi** di partite duplicate, "
+                st.warning(f"Trovati **{len(gruppi_dup)} gruppi** di partite duplicate "
+                           "(stesse squadre, stesso risultato, date entro 2 giorni), "
                            f"per un totale di **{n_extra} copie** da rimuovere.")
                 # anteprima primi 15 gruppi
                 _ant = []
-                for k, v in list(gruppi_dup.items())[:15]:
+                for (kk, _g), v in list(gruppi_dup.items())[:15]:
                     p0 = v[0]
+                    _date_str = ", ".join(sorted(set(str(x.get("data"))[:10] for x in v)))
                     _ant.append(f"{p0.get('squadra_casa')} - {p0.get('squadra_trasferta')} "
-                                f"({k[0]}) {k[3]}  ×{len(v)}")
+                                f"{kk[2]}  [{_date_str}]  ×{len(v)}")
                 st.text("\n".join(_ant))
                 if len(gruppi_dup) > 15:
                     st.caption(f"…e altri {len(gruppi_dup) - 15} gruppi.")
                 st.caption("Rimuovendo, per ogni gruppo si tiene la partita con più informazioni "
-                           "(quote/target) e si cancellano le copie identiche.")
+                           "(quote/target) e si cancellano le copie vicine nel tempo.")
                 if st.button("🧹 Rimuovi i duplicati", type="primary"):
                     _cli = get_client()
                     rimossi = 0
-                    for k, v in gruppi_dup.items():
-                        # tieni quella "migliore": priorità a is_target, poi a chi ha quote/id
+                    for _kg, v in gruppi_dup.items():
+                        # tieni quella "migliore": priorità a is_target, poi a chi ha quote
                         def _punteggio(p):
                             s = 0
                             if p.get("is_target") is True:
@@ -2521,7 +2549,6 @@ def pagina_database(user):
                                 s += 10
                             return s
                         v_ord = sorted(v, key=_punteggio, reverse=True)
-                        tieni = v_ord[0]
                         for p in v_ord[1:]:
                             try:
                                 _cli.table("partite").delete().eq("id", p.get("id")).execute()
