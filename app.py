@@ -2639,25 +2639,28 @@ def pagina_database(user):
                                  key="om_separa"):
                         _cli = get_client()
                         _agg = 0
-                        # mappa competizione(chiave) -> nazione, precalcolata UNA volta (evita di
-                        # chiamare _nazione_di per ogni partita = migliaia di scansioni)
                         _naz_map = {}
                         for _, c in comp_df_om.iterrows():
                             na = _txt(c.get("nazione"))
                             for kk in _chiavi_competizione(c):
                                 _naz_map[kk] = na
-                        # filtra SOLO le partite di questa squadra (poche), non tutto il df
-                        _mine = df[(df["squadra_casa"] == _scelta_sq) |
-                                   (df["squadra_trasferta"] == _scelta_sq)]
+                        # filtra le partite di questa squadra (match esatto O normalizzato)
+                        _ksel = _key(_norm_squadra(_scelta_sq))
+                        _mine = df[
+                            (df["squadra_casa"].map(lambda x: _key(_norm_squadra(x))) == _ksel) |
+                            (df["squadra_trasferta"].map(lambda x: _key(_norm_squadra(x))) == _ksel)]
+                        _viste_naz = set()
                         for _, p in _mine.iterrows():
                             naz = _naz_map.get(_key(_txt(p.get("competizione"))))
+                            if naz:
+                                _viste_naz.add(naz)
                             if not naz or _key(naz) in _non_paesi or naz not in nazioni:
                                 continue
                             nuovo = f"{_scelta_sq} ({naz})"
                             _upd = {}
-                            if _txt(p.get("squadra_casa")) == _scelta_sq:
+                            if _key(_norm_squadra(p.get("squadra_casa"))) == _ksel:
                                 _upd["squadra_casa"] = nuovo
-                            if _txt(p.get("squadra_trasferta")) == _scelta_sq:
+                            if _key(_norm_squadra(p.get("squadra_trasferta"))) == _ksel:
                                 _upd["squadra_trasferta"] = nuovo
                             if _upd:
                                 try:
@@ -2665,12 +2668,18 @@ def pagina_database(user):
                                     _agg += 1
                                 except Exception:
                                     pass
-                        salva_squadra_ambigua(_scelta_sq, nazioni)
-                        _invalida_partite()
-                        st.success(f"Separate {_agg} partite di campionato (una versione per paese) "
-                                   f"e «{_scelta_sq}» registrata come ambigua. Le partite di coppa "
-                                   "internazionale restano col nome originale: assegnale a mano.")
-                        st.rerun()
+                        if _agg == 0:
+                            st.warning(f"⚠️ Nessuna partita separata. Diagnostica: trovate "
+                                       f"{len(_mine)} partite di «{_scelta_sq}», nazioni viste: "
+                                       f"{sorted(_viste_naz)}; nazioni attese: {sorted(nazioni)}. "
+                                       "Se le nazioni non combaciano, il filtro le scarta.")
+                        else:
+                            salva_squadra_ambigua(_scelta_sq, nazioni)
+                            _invalida_partite()
+                            st.success(f"Separate {_agg} partite di campionato (una versione per "
+                                       f"paese) e «{_scelta_sq}» registrata come ambigua. Le "
+                                       "partite di coppa restano col nome originale.")
+                            st.rerun()
                     st.caption("⚠️ Le partite di coppa internazionale (nazione neutra) NON vengono "
                                "toccate: restano «" + _scelta_sq + "» e le assegnerai manualmente.")
 
