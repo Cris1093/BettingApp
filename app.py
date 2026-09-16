@@ -727,6 +727,64 @@ def carica_competizioni():
     return pd.DataFrame(res.data or [])
 
 
+def marca_campionati_inaffidabili(coppie):
+    """coppie = lista di (nome_lungo, nazione). Segna quei campionati come inaffidabili nel DB
+    (crea la riga se non esiste). Ritorna il numero di campionati marcati."""
+    cli = get_client()
+    if not cli or not coppie:
+        return 0
+    try:
+        esist = cli.table("competizioni").select("id,nome_lungo,nazione,inaffidabile").execute().data or []
+    except Exception:
+        esist = []
+    idx = {(_key(_txt(e.get("nome_lungo"))), _key(_txt(e.get("nazione")))): e for e in esist}
+    n = 0
+    for nome, naz in coppie:
+        k = (_key(_txt(nome)), _key(_txt(naz)))
+        e = idx.get(k)
+        try:
+            if e:
+                if not e.get("inaffidabile"):
+                    cli.table("competizioni").update({"inaffidabile": True}).eq("id", e["id"]).execute()
+                    n += 1
+            else:
+                cli.table("competizioni").insert({
+                    "nome_lungo": nome, "nazione": naz,
+                    "categoria": "Non assegnata", "inaffidabile": True}).execute()
+                n += 1
+        except Exception:
+            pass
+    if n:
+        st.cache_data.clear()
+    return n
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _squadre_inaffidabili():
+    """Set delle chiavi-squadra che appartengono a campionati marcati inaffidabili.
+    Le partite di queste squadre restano nel DB ma vanno escluse da motori/snapshot/console."""
+    cli = get_client()
+    df = carica_partite()
+    comp_df = carica_competizioni()
+    if df.empty or comp_df.empty or "inaffidabile" not in comp_df.columns:
+        return set()
+    # chiavi competizione inaffidabili
+    inaff = comp_df[comp_df["inaffidabile"] == True] if "inaffidabile" in comp_df.columns else comp_df.iloc[0:0]
+    if inaff.empty:
+        return set()
+    chiavi_inaff = set()
+    for _, c in inaff.iterrows():
+        for kk in _chiavi_competizione(c):
+            chiavi_inaff.add(kk)
+    # squadre che giocano in quei campionati
+    squadre = set()
+    for _, p in df.iterrows():
+        if _key(_txt(p.get("competizione"))) in chiavi_inaff:
+            squadre.add(_key(_norm_squadra(p.get("squadra_casa"))))
+            squadre.add(_key(_norm_squadra(p.get("squadra_trasferta"))))
+    return squadre
+
+
 def upsert_competizioni(records):
     cli = get_client()
     if not cli:
@@ -1352,6 +1410,44 @@ def _norm_squadra(s):
     """Toglie il codice paese '(Kaz)' e normalizza per il confronto."""
     s = re.sub(r"\(.*?\)", "", _txt(s))
     return re.sub(r"\s+", " ", s).strip()
+
+
+def _campionati_vuoti(testo, partite_trovate):
+    """Identifica i campionati che compaiono nel testo incollato ma SENZA partite sotto.
+    'partite_trovate' = lista di dict con 'competizione'. Ritorna lista di (nome, nazione)
+    dei campionati vuoti = inaffidabili. La nazione è sempre in MAIUSCOLO (ITALIA, EUROPA…)."""
+    righe = [r.strip() for r in testo.splitlines() if r.strip()]
+    con_partite = set()
+    for p in (partite_trovate or []):
+        lbl = p.get("competizione")
+        if lbl:
+            con_partite.add(_key(lbl))
+
+    def _e_nazione(s):
+        s2 = s.strip()
+        return (len(s2) >= 3 and s2 == s2.upper()
+                and any(c.isalpha() for c in s2) and not s2[0].isdigit())
+
+    vuoti = []
+    visti = set()
+    i = 0
+    while i < len(righe) - 1:
+        nome = righe[i]
+        naz = righe[i + 1]
+        # intestazione competizione = nome (non-nazione) + nazione (maiuscolo), MA la riga
+        # successiva NON deve essere una ripetizione (che indicherebbe una squadra, es.
+        # "Drukpa / RTC / RTC" dove RTC è una squadra ripetuta, non una nazione)
+        if (_e_nazione(naz) and not _e_nazione(nome)
+                and not (i + 2 < len(righe) and righe[i + 2] == naz)
+                and nome != naz):
+            lbl = label_competizione(nome, naz)
+            k = _key(lbl) if lbl else None
+            if k and k not in visti:
+                visti.add(k)
+                if k not in con_partite:
+                    vuoti.append((nome, naz))
+        i += 1
+    return vuoti
 
 
 def parse_risultati(testo):
@@ -2218,7 +2314,7 @@ def genera_docx_nuova_analisi(df, comp_df):
                                  odds=odds, variazioni=_variazioni_da_row(row),
                                  escludi_id=row.get("id"),
                                  competizione=_label_da_comp(row.get("competizione"), comp_df))
-        if not racc or racc.get("_storico_insufficiente"):
+        if not racc or (racc.get("_storico_insufficiente") or racc.get("_inaffidabile")):
             doc.add_paragraph("Storico insufficiente per l'analisi.")
         else:
             doc.add_paragraph().add_run(f"Pronostico: {racc['pronostico']['testo']}").bold = True
@@ -2266,7 +2362,7 @@ def genera_docx_mercati(df, comp_df):
                                  odds=odds, variazioni=_variazioni_da_row(row),
                                  escludi_id=row.get("id"),
                                  competizione=_label_da_comp(row.get("competizione"), comp_df))
-        if not racc or racc.get("_storico_insufficiente"):
+        if not racc or (racc.get("_storico_insufficiente") or racc.get("_inaffidabile")):
             doc.add_paragraph("Storico insufficiente per l'analisi.")
         else:
             for sez in racc["sezioni"]:
@@ -3052,6 +3148,23 @@ def pagina_estrattore_risultati(user):
         st.warning("Nessun risultato riconosciuto.")
         return
 
+    # rileva campionati SENZA partite (inaffidabili): diretta.it a volte non li carica
+    _vuoti = _campionati_vuoti(testo, risultati)
+    if _vuoti:
+        st.warning("⚠️ **Campionati senza partite in questo incollaggio** (verranno segnati "
+                   "come INAFFIDABILI: le loro squadre restano nel DB ma escluse da motori/"
+                   "snapshot/console):\n\n"
+                   + "\n".join(f"• {nm} | {nz}" for nm, nz in _vuoti[:20])
+                   + (f"\n…e altri {len(_vuoti)-20}" if len(_vuoti) > 20 else ""))
+        if st.button(f"🚫 Segna {len(_vuoti)} campionati come inaffidabili"):
+            _n = marca_campionati_inaffidabili(_vuoti)
+            try:
+                _squadre_inaffidabili.clear()
+            except Exception:
+                pass
+            st.success(f"{_n} campionati segnati come inaffidabili. Le loro squadre sono "
+                       "escluse dai motori. Puoi togliere il flag in Configurazione.")
+
     part_tutte = carica_partite()
     comp_df = carica_competizioni()
     # FILTRA le partite alla data selezionata: il match avviene solo con quel giorno,
@@ -3376,6 +3489,21 @@ def pagina_estrattore_pianificazione(user):
     if not fixtures:
         st.warning("Nessuna partita riconosciuta.")
         return
+
+    # rileva campionati SENZA partite (inaffidabili)
+    _vuoti_p = _campionati_vuoti(testo, fixtures)
+    if _vuoti_p:
+        st.warning("⚠️ **Campionati senza partite in questo incollaggio** (segnabili come "
+                   "INAFFIDABILI: squadre escluse da motori/snapshot/console, ma restano nel "
+                   "DB):\n\n" + "\n".join(f"• {nm} | {nz}" for nm, nz in _vuoti_p[:20])
+                   + (f"\n…e altri {len(_vuoti_p)-20}" if len(_vuoti_p) > 20 else ""))
+        if st.button(f"🚫 Segna {len(_vuoti_p)} campionati come inaffidabili", key="pian_inaff"):
+            _n = marca_campionati_inaffidabili(_vuoti_p)
+            try:
+                _squadre_inaffidabili.clear()
+            except Exception:
+                pass
+            st.success(f"{_n} campionati segnati come inaffidabili.")
 
     comp_df = carica_competizioni()
 
@@ -3867,6 +3995,13 @@ def _snapshot_prematch_una(df, comp_df, riga):
     gc, gt = riga.get("gol_casa"), riga.get("gol_trasferta")
     if not (_num_ok(gc) and _num_ok(gt)):
         return None
+    # esclusione campionati inaffidabili: niente snapshot per queste squadre
+    try:
+        _inaff = _squadre_inaffidabili()
+        if _inaff and (_key(_norm_squadra(home)) in _inaff or _key(_norm_squadra(away)) in _inaff):
+            return None
+    except Exception:
+        pass
     t_liv = _livello_di(riga.get("competizione"), comp_df)
     t_cat = categoria_di(riga.get("competizione"), comp_df)
     t_key = _key(riga.get("competizione")) if riga.get("competizione") else None
@@ -4592,6 +4727,34 @@ def pagina_configurazione(user):
                     st.success(f"Rimosse {rimossi} competizioni duplicate.")
                     st.rerun()
 
+    # === CAMPIONATI INAFFIDABILI ===
+    with st.expander("🚫 Campionati inaffidabili (esclusi da motori/snapshot)"):
+        st.caption("I campionati marcati inaffidabili (diretta.it non ne carica sempre i "
+                   "risultati) hanno le squadre ESCLUSE da motori, snapshot e console analitica. "
+                   "Le partite restano nel database. Togli il flag per riabilitarli.")
+        _cc_all = carica_competizioni()
+        if _cc_all.empty or "inaffidabile" not in _cc_all.columns:
+            st.info("Nessun campionato o colonna 'inaffidabile' assente.")
+        else:
+            _inaff_df = _cc_all[_cc_all["inaffidabile"] == True]
+            if _inaff_df.empty:
+                st.success("Nessun campionato inaffidabile. 👍")
+            else:
+                st.warning(f"{len(_inaff_df)} campionati inaffidabili:")
+                for _, c in _inaff_df.sort_values("nome_lungo").iterrows():
+                    _cc1, _cc2 = st.columns([3, 1])
+                    _cc1.write(f"• {c.get('nome_lungo')} | {c.get('nazione')}")
+                    if _cc2.button("✅ Riabilita", key=f"riab_{c.get('id')}"):
+                        try:
+                            get_client().table("competizioni").update(
+                                {"inaffidabile": False}).eq("id", c.get("id")).execute()
+                            st.cache_data.clear()
+                            _squadre_inaffidabili.clear()
+                            st.success(f"«{c.get('nome_lungo')}» riabilitato.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Errore: {e}")
+
     st.subheader("👥 Utenti")
     utenti = carica_utenti()
     if utenti:
@@ -5022,6 +5185,15 @@ def analisi_ragionata(df, home, away, data_partita=None, odds=None, variazioni=N
     """Ponte verso il nuovo motore: evidenze -> signal score -> racconto.
     Ritorna il dict del racconto, oppure None se manca lo storico."""
     comp_df = carica_competizioni()
+    # ESCLUSIONE campionati inaffidabili: se una squadra appartiene a un campionato che
+    # diretta.it carica a intermittenza (marcato inaffidabile), lo storico è incompleto e
+    # il pronostico sballerebbe -> non generare
+    try:
+        _inaff = _squadre_inaffidabili()
+        if _inaff and (_key(_norm_squadra(home)) in _inaff or _key(_norm_squadra(away)) in _inaff):
+            return {"_inaffidabile": True, "home": home, "away": away}
+    except Exception:
+        pass
     t_liv = _livello_di(competizione, comp_df) if competizione else None
     t_cat = categoria_di(competizione, comp_df) if competizione else None
     t_key = _key(competizione) if competizione else None
@@ -5058,7 +5230,13 @@ def _riepilogo_pesi(partite, hcap):
 
 def render_racconto_st(racc):
     """Rende l'analisi ragionata (nuovo motore) in Streamlit."""
-    if racc and racc.get("_storico_insufficiente"):
+    if racc and racc.get("_inaffidabile"):
+        st.warning(f"🚫 Pronostico non generato: «{racc.get('home','')}» o "
+                   f"«{racc.get('away','')}» appartiene a un campionato segnato INAFFIDABILE "
+                   "(diretta.it non ne carica sempre i risultati). Togli il flag in "
+                   "Configurazione se vuoi includerlo.")
+        return
+    if racc and (racc.get("_storico_insufficiente") or racc.get("_inaffidabile")):
         st.warning(f"⛔ Storico insufficiente per generare il pronostico. Servono almeno "
                    f"**{racc.get('min_richiesto', 15)} partite** per squadra: "
                    f"{racc.get('home','casa')} ne ha **{racc.get('n_home', 0)}**, "
@@ -5306,7 +5484,7 @@ def pagina_analisi(user):
                              competizione=comp_target, recency_decay=an_recency)
     render_racconto_st(racc)
     # storico insufficiente: non generare/salvare il pronostico monco, ferma qui l'analisi
-    if racc and racc.get("_storico_insufficiente"):
+    if racc and (racc.get("_storico_insufficiente") or racc.get("_inaffidabile")):
         return
 
     # --- 🤖 Pronostico del Motore ML (predittore) ---
@@ -5587,7 +5765,7 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False, lim
             racc = analisi_ragionata(df_tutte, r.get("squadra_casa"), r.get("squadra_trasferta"),
                                      data_partita=r.get("data"), escludi_id=pid,
                                      competizione=comp, odds=odds, indice=indice)
-            if racc and racc.get("_storico_insufficiente"):
+            if racc and (racc.get("_storico_insufficiente") or racc.get("_inaffidabile")):
                 continue   # meno di 15 partite: niente pronostico per questa
             if not racc:
                 # il nuovo motore non ha prodotto nulla (una squadra senza storico nel DB):
@@ -5712,14 +5890,14 @@ def _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config
                              variazioni=variazioni, escludi_id=row.get("id"),
                              competizione=comp_target, indice=indice)
     # meno di 15 partite di storico: non genero il pronostico
-    if racc and racc.get("_storico_insufficiente"):
+    if racc and (racc.get("_storico_insufficiente") or racc.get("_inaffidabile")):
         return None
     # fallback: se col df ridotto/indice non esce nulla, riprova col df COMPLETO senza indice
     if racc is None:
         racc = analisi_ragionata(df, home, away, data_partita=data_partita, odds=odds,
                                  variazioni=variazioni, escludi_id=row.get("id"),
                                  competizione=comp_target)
-    if racc and racc.get("_storico_insufficiente"):
+    if racc and (racc.get("_storico_insufficiente") or racc.get("_inaffidabile")):
         return None
     # se anche così è None, si prosegue: i campi motore useranno il fallback del vecchio
     # motore più sotto, così il pronostico viene comunque salvato completo.
