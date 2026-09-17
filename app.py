@@ -1495,7 +1495,9 @@ def parse_risultati(testo):
             # appena trovi altro (nuova squadra o intestazione) per non disallineare.
             i = i + 4
             _marcatori = {"-", "post.", "rinv.", "rinviata", "posticipata", "sospesa",
-                          "canc.", "annullata", "n.d.", "nd"}
+                          "canc.", "annullata", "n.d.", "nd", "a tav.", "a tavolino",
+                          "tav.", "rinviato", "sospeso", "abb.", "abbandonata", "walkover",
+                          "w.o.", "wo"}
             while i < n and righe[i].strip().lower() in _marcatori:
                 i += 1
             continue
