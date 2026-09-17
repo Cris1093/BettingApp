@@ -5182,6 +5182,10 @@ def _partite_squadra_evidenze(df, team, prima_di=None, escludi_id=None,
         else:
             rec.update({"gf": int(m["gol_trasferta"]), "gs": int(m["gol_casa"]), "casa": False})
         out.append(rec)
+        # considera SOLO le ultime 15 partite (le più recenti): 'partite' è già ordinato
+        # dalla più recente, quindi mi fermo appena raggiungo 15
+        if len(out) >= 15:
+            break
     return out
 
 
