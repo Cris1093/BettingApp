@@ -1489,7 +1489,32 @@ def parse_risultati(testo):
                 while i < n and is_int(righe[i]):
                     i += 1
                 continue
-            i += 4
+            # squadre ripetute ma SENZA due numeri validi = partita RINVIATA/POSTICIPATA
+            # (es. "Levante, Levante, Ath. Bilbao, Ath. Bilbao, Post., -, -"): salta le 4 righe
+            # squadre, poi salta SOLO i marcatori noti di rinvio (Post., -, ecc.), fermandoti
+            # appena trovi altro (nuova squadra o intestazione) per non disallineare.
+            i = i + 4
+            _marcatori = {"-", "post.", "rinv.", "rinviata", "posticipata", "sospesa",
+                          "canc.", "annullata", "n.d.", "nd"}
+            while i < n and righe[i].strip().lower() in _marcatori:
+                i += 1
+            continue
+        # blocco MALFORMATO: casa, casa, trasf (NON ripetuta), gol, gol
+        # (es. "ASPAC (Ben), ASPAC (Ben), Panthers (Gnq), 2, 4" - trasferta non ripetuta)
+        if (i + 4 < n and righe[i] == righe[i + 1] and righe[i + 2] != righe[i + 3]
+                and not is_int(righe[i + 2]) and is_int(righe[i + 3]) and is_int(righe[i + 4])):
+            gc = int(re.sub(r"\(.*?\)", "", righe[i + 3]))
+            gt = int(re.sub(r"\(.*?\)", "", righe[i + 4]))
+            risultati.append({
+                "competizione": label_competizione(comp_corr, naz_corr) or None,
+                "nome_lungo": comp_corr, "nazione": naz_corr,
+                "casa": righe[i], "trasferta": righe[i + 2],
+                "qualificatore": None,
+                "gol_casa": gc, "gol_trasferta": gt,
+            })
+            i = i + 5
+            while i < n and is_int(righe[i]):
+                i += 1
             continue
         # blocco con NUMERO ORFANO tra casa e trasferta: casa,casa,[num],trasf,trasf,gol,gol
         # (es. "Moreirense U23, Moreirense U23, 2, Braga U23, Braga U23, 1, 1")
