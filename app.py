@@ -6714,16 +6714,20 @@ def pagina_console_partite(user):
         return
 
     # conteggio storico per squadra: quante partite CONCLUSE ha ciascuna nel DB
-    # (indice veloce, costruito una volta)
+    # (indice veloce, costruito una volta).
+    # IMPORTANTE: si usa _key(...) SENZA _norm_squadra, così il tag nazione tra parentesi
+    # viene PRESERVATO: 'Santos (BRASILE)' e 'Santos (PERU)' restano squadre distinte, come
+    # le tratta il motore (che abbina per nome esatto). _norm_squadra toglierebbe la parentesi
+    # e le fonderebbe in un'unica chiave 'santos', gonfiando il conteggio.
     concl = df[df["gol_casa"].notna() & df["gol_trasferta"].notna()]
     conteggio = {}
     if not concl.empty:
         for s in pd.concat([concl["squadra_casa"], concl["squadra_trasferta"]]):
-            k = _key(_norm_squadra(s))
+            k = _key(s)
             conteggio[k] = conteggio.get(k, 0) + 1
 
     def _storico(sq):
-        return conteggio.get(_key(_norm_squadra(sq)), 0)
+        return conteggio.get(_key(sq), 0)
 
     # costruisci la tabella della console
     righe = []
