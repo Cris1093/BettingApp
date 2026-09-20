@@ -2724,12 +2724,11 @@ def pagina_database(user):
 
     # === SQUADRE OMONIME (stesso nome, nazioni diverse) ===
     with st.expander("🕵️ Squadre omonime (stesso nome, campionati di nazioni diverse)"):
-        st.caption("Rileva squadre con lo STESSO nome che giocano in campionati di nazioni "
-                   "diverse (es. 'San Antonio' in Ecuador e in USA). Sono squadre DIVERSE che "
-                   "il sistema tratta come una sola. Rinominane una per separarle (es. aggiungi "
-                   "il paese), aggiornando tutte le sue partite di quella nazione.")
+        st.caption("Squadre con lo STESSO nome che giocano in campionati di nazioni diverse "
+                   "(es. 'Santos' in Brasile e in Perù). Sono squadre DIVERSE: qui le separi "
+                   "aggiungendo il paese al nome, così il motore non mescola i loro storici.")
         if not st.session_state.get("_calc_omonime"):
-            if st.button("🔍 Rileva squadre omonime"):
+            if st.button("🔍 Carica squadre omonime"):
                 st.session_state["_calc_omonime"] = True
                 st.rerun()
             ambigue = None
@@ -2741,84 +2740,128 @@ def pagina_database(user):
                           "australia e oceania", "internazionale", "world", "conmebol", "concacaf",
                           "uefa", "afc", "caf", "fifa"}
         if ambigue is not None:
-            if not ambigue:
-                st.success("Nessuna squadra omonima reale rilevata (nessun nome gioca in "
-                           "campionati nazionali di paesi diversi). 👍")
-            else:
-                st.warning(f"Trovate **{len(ambigue)} squadre** che giocano in campionati di "
-                           "paesi diversi (vere omonime da separare):")
-                _amb_esist = carica_squadre_ambigue()
-                _scelta_sq = st.selectbox("Squadra da separare",
-                                          sorted(ambigue.keys()), key="om_squadra")
-                if _scelta_sq:
-                    nazioni = sorted(ambigue[_scelta_sq])
-                    _gia = _key(_norm_squadra(_scelta_sq)) in _amb_esist
-                    st.caption(f"«{_scelta_sq}» compare nei campionati di: {', '.join(nazioni)}"
-                               + ("  ·  ✅ già registrata come ambigua" if _gia else ""))
-                    st.markdown("**Sistemazione retroattiva:** rinomina le partite di CAMPIONATO "
-                                "(non le coppe internazionali) aggiungendo il paese, e registra la "
-                                "squadra come ambigua (così le future partite verranno gestite).")
-                    if st.button("✏️ Separa e registra come ambigua", type="primary",
-                                 key="om_separa"):
-                        _cli = get_client()
-                        _agg = 0
-                        _naz_map = {}
-                        for _, c in comp_df_om.iterrows():
-                            na = _txt(c.get("nazione"))
-                            for kk in _chiavi_competizione(c):
-                                _naz_map[kk] = na
-                        # filtra le partite di questa squadra (match esatto O normalizzato)
-                        _ksel = _key(_norm_squadra(_scelta_sq))
-                        _mine = df[
-                            (df["squadra_casa"].map(lambda x: _key(_norm_squadra(x))) == _ksel) |
-                            (df["squadra_trasferta"].map(lambda x: _key(_norm_squadra(x))) == _ksel)]
-                        _viste_naz = set()
-                        for _, p in _mine.iterrows():
-                            naz = _naz_map.get(_key(_txt(p.get("competizione"))))
-                            if naz:
-                                _viste_naz.add(naz)
-                            if not naz or _key(naz) in _non_paesi or naz not in nazioni:
-                                continue
-                            nuovo = f"{_scelta_sq} ({naz})"
-                            _upd = {}
-                            if _key(_norm_squadra(p.get("squadra_casa"))) == _ksel:
-                                _upd["squadra_casa"] = nuovo
-                            if _key(_norm_squadra(p.get("squadra_trasferta"))) == _ksel:
-                                _upd["squadra_trasferta"] = nuovo
-                            if _upd:
-                                try:
-                                    _cli.table("partite").update(_upd).eq("id", p.get("id")).execute()
-                                    _agg += 1
-                                except Exception:
-                                    pass
-                        if _agg == 0:
-                            st.warning(f"⚠️ Nessuna partita separata. Diagnostica: trovate "
-                                       f"{len(_mine)} partite di «{_scelta_sq}», nazioni viste: "
-                                       f"{sorted(_viste_naz)}; nazioni attese: {sorted(nazioni)}. "
-                                       "Se le nazioni non combaciano, il filtro le scarta.")
-                        else:
-                            salva_squadra_ambigua(_scelta_sq, nazioni)
-                            _invalida_partite()
-                            st.success(f"Separate {_agg} partite di campionato (una versione per "
-                                       f"paese) e «{_scelta_sq}» registrata come ambigua. Le "
-                                       "partite di coppa restano col nome originale.")
-                            st.rerun()
-                    st.caption("⚠️ Le partite di coppa internazionale (nazione neutra) NON vengono "
-                               "toccate dal pulsante qui sopra: le assegni con lo strumento qui sotto.")
+            # UNIONE di squadre RILEVATE (da separare) + già REGISTRATE come ambigue.
+            _amb_esist = carica_squadre_ambigue()
+            _opzioni = {}  # nome_base -> {'nazioni': set, 'rilevata': bool}
+            for nm, nz in (ambigue or {}).items():
+                o = _opzioni.setdefault(nm, {"nazioni": set(), "rilevata": False})
+                o["nazioni"] |= set(nz)
+                o["rilevata"] = True
+            for _kb, info in _amb_esist.items():
+                nm = info.get("nome")
+                if not nm:
+                    continue
+                o = _opzioni.setdefault(nm, {"nazioni": set(), "rilevata": False})
+                o["nazioni"] |= set(info.get("nazioni") or [])
 
-                    # === ASSEGNAZIONE MANUALE DELLE PARTITE COL NOME SEMPLICE (coppe) ===
-                    st.divider()
-                    st.markdown(f"**Assegna le partite ancora salvate come «{_scelta_sq}» "
-                                "(senza nazione)** — di solito coppe internazionali. Guarda "
-                                "l'avversario, scegli la nazione dal menù e premi «Applica».")
+            if not _opzioni:
+                st.success("Nessuna squadra omonima rilevata né registrata. 👍")
+            else:
+                # colonne-chiave calcolate UNA volta per contare le partite col nome semplice
+                _kc_all = df["squadra_casa"].map(_key)
+                _kt_all = df["squadra_trasferta"].map(_key)
+
+                def _n_da_assegnare(base):
+                    kb = _key(base)  # nome SEMPLICE (senza parentesi): sono le partite da taggare
+                    return int(((_kc_all == kb) | (_kt_all == kb)).sum())
+
+                # ---- LISTA CON STATO ----
+                st.markdown("### Elenco squadre omonime")
+                _lista = []
+                _stato_map = {}
+                for nm in sorted(_opzioni.keys()):
+                    n_pl = _n_da_assegnare(nm)
+                    _stato_map[nm] = n_pl
+                    _lista.append({
+                        "Stato": "✅" if n_pl == 0 else "❌",
+                        "Squadra": nm,
+                        "Nazioni": ", ".join(sorted(_opzioni[nm]["nazioni"])) or "—",
+                        "Da assegnare": n_pl,
+                        "Da separare": "sì" if _opzioni[nm]["rilevata"] else "—",
+                    })
+                _tl = pd.DataFrame(_lista).sort_values(
+                    ["Stato", "Squadra"], ascending=[False, True]).reset_index(drop=True)
+                st.dataframe(_tl, use_container_width=True, hide_index=True)
+                _n_ko = sum(1 for v in _stato_map.values() if v > 0)
+                st.caption(f"✅ = tutte le partite hanno la nazione · ❌ = ci sono partite col "
+                           f"nome semplice ancora da assegnare. Da sistemare: **{_n_ko}**.")
+
+                # ---- SELEZIONE + ASSEGNAZIONE ----
+                st.divider()
+                st.markdown("### Sistema una squadra")
+
+                def _fmt(nm):
+                    return ("✅ " if _stato_map.get(nm, 0) == 0 else "❌ ") + nm
+
+                _ordinate = sorted(_opzioni.keys(),
+                                   key=lambda n: (_stato_map.get(n, 0) == 0, n))
+                _scelta_sq = st.selectbox("Squadra", _ordinate, key="om_squadra",
+                                          format_func=_fmt)
+                if _scelta_sq:
+                    nazioni = sorted(_opzioni[_scelta_sq]["nazioni"])
+                    _e_rilevata = _opzioni[_scelta_sq]["rilevata"]
+
+                    # separazione partite di CAMPIONATO (solo se rilevata come nuova)
+                    if _e_rilevata:
+                        st.markdown("**1) Separa i campionati** — rinomina le partite di "
+                                    "campionato aggiungendo il paese (le coppe si assegnano dopo).")
+                        if st.button("✏️ Separa campionati e registra come ambigua",
+                                     type="primary", key="om_separa"):
+                            _cli = get_client()
+                            _agg = 0
+                            _naz_map = {}
+                            for _, c in comp_df_om.iterrows():
+                                na = _txt(c.get("nazione"))
+                                for kk in _chiavi_competizione(c):
+                                    _naz_map[kk] = na
+                            _ksel = _key(_norm_squadra(_scelta_sq))
+                            _mine = df[
+                                (df["squadra_casa"].map(lambda x: _key(_norm_squadra(x))) == _ksel) |
+                                (df["squadra_trasferta"].map(lambda x: _key(_norm_squadra(x))) == _ksel)]
+                            _viste_naz = set()
+                            for _, p in _mine.iterrows():
+                                naz = _naz_map.get(_key(_txt(p.get("competizione"))))
+                                if naz:
+                                    _viste_naz.add(naz)
+                                if not naz or _key(naz) in _non_paesi or naz not in nazioni:
+                                    continue
+                                nuovo = f"{_scelta_sq} ({naz})"
+                                _upd = {}
+                                if _key(_norm_squadra(p.get("squadra_casa"))) == _ksel:
+                                    _upd["squadra_casa"] = nuovo
+                                if _key(_norm_squadra(p.get("squadra_trasferta"))) == _ksel:
+                                    _upd["squadra_trasferta"] = nuovo
+                                if _upd:
+                                    try:
+                                        _cli.table("partite").update(_upd).eq("id", p.get("id")).execute()
+                                        _agg += 1
+                                    except Exception:
+                                        pass
+                            if _agg == 0:
+                                st.warning(f"⚠️ Nessuna partita separata. Trovate {len(_mine)} "
+                                           f"partite di «{_scelta_sq}», nazioni viste: "
+                                           f"{sorted(_viste_naz)}; attese: {sorted(nazioni)}.")
+                            else:
+                                salva_squadra_ambigua(_scelta_sq, nazioni)
+                                _invalida_partite()
+                                st.success(f"Separate {_agg} partite di campionato. Ora assegna "
+                                           "le eventuali partite di coppa qui sotto.")
+                                st.rerun()
+
+                    # assegnazione partite col NOME SEMPLICE (coppe e non solo)
+                    _titolo2 = "**2) Assegna le partite senza nazione**" if _e_rilevata \
+                        else "**Assegna le partite senza nazione**"
+                    if nazioni:
+                        _titolo2 += (f" — per ognuna scegli il nome corretto "
+                                     f"(es. «{_scelta_sq} ({nazioni[0]})»).")
+                    st.markdown(_titolo2)
                     _kplain = _key(_scelta_sq)  # chiave del NOME SEMPLICE (senza tag)
-                    _plain = df[
-                        (df["squadra_casa"].map(lambda x: _key(x)) == _kplain) |
-                        (df["squadra_trasferta"].map(lambda x: _key(x)) == _kplain)]
+                    _plain = df[(_kc_all == _kplain) | (_kt_all == _kplain)]
                     if _plain.empty:
-                        st.caption("✅ Nessuna partita col nome semplice da assegnare: tutte "
-                                   "le partite di «" + _scelta_sq + "» hanno già la nazione.")
+                        st.success("✅ Tutte le partite di «" + _scelta_sq + "» hanno già la "
+                                   "nazione: niente da assegnare.")
                     else:
+                        _target = [f"{_scelta_sq} ({n})" for n in nazioni]  # nomi completi
                         _rows_c = []
                         for _, p in _plain.sort_values("data", ascending=False).iterrows():
                             gc, gt = p.get("gol_casa"), p.get("gol_trasferta")
@@ -2832,7 +2875,7 @@ def pagina_database(user):
                                 "Risultato": ris,
                                 "Competizione": _label_da_comp(p.get("competizione"),
                                                                comp_df_om) or "—",
-                                "Nazione": "—",
+                                "Assegna a": "—",
                             })
                         _vdf_c = pd.DataFrame(_rows_c)
                         _ed_c = st.data_editor(
@@ -2842,19 +2885,18 @@ def pagina_database(user):
                                       "Competizione"],
                             column_config={
                                 "id": None,
-                                "Nazione": st.column_config.SelectboxColumn(
-                                    "Nazione", options=["—"] + list(nazioni),
-                                    help="Scegli la nazione della squadra in QUESTA partita"),
+                                "Assegna a": st.column_config.SelectboxColumn(
+                                    "Assegna a", options=["—"] + _target,
+                                    help="Scegli il nome completo da assegnare a QUESTA partita"),
                             })
                         if st.button("✅ Applica assegnazioni", type="primary",
                                      key=f"om_applica_coppe_{_kplain}"):
                             _cli = get_client()
                             _nc = 0
                             for _, r in _ed_c.iterrows():
-                                naz = _txt(r.get("Nazione"))
-                                if not naz or naz == "—":
+                                nuovo = _txt(r.get("Assegna a"))
+                                if not nuovo or nuovo == "—":
                                     continue
-                                nuovo = f"{_scelta_sq} ({naz})"
                                 orig = df[df["id"] == r["id"]]
                                 if orig.empty:
                                     continue
@@ -2876,8 +2918,8 @@ def pagina_database(user):
                                 st.success(f"Assegnate {_nc} partite. Ricarico…")
                                 st.rerun()
                             else:
-                                st.info("Nessuna nazione selezionata: niente da assegnare. "
-                                        "Scegli la nazione nella colonna «Nazione».")
+                                st.info("Nessuna riga assegnata: scegli il nome nella colonna "
+                                        "«Assegna a».")
 
     # === SQUADRE OMONIME - fine ===
     # --- Partite da compilare ---
