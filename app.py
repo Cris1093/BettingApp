@@ -2804,7 +2804,80 @@ def pagina_database(user):
                                        "partite di coppa restano col nome originale.")
                             st.rerun()
                     st.caption("⚠️ Le partite di coppa internazionale (nazione neutra) NON vengono "
-                               "toccate: restano «" + _scelta_sq + "» e le assegnerai manualmente.")
+                               "toccate dal pulsante qui sopra: le assegni con lo strumento qui sotto.")
+
+                    # === ASSEGNAZIONE MANUALE DELLE PARTITE COL NOME SEMPLICE (coppe) ===
+                    st.divider()
+                    st.markdown(f"**Assegna le partite ancora salvate come «{_scelta_sq}» "
+                                "(senza nazione)** — di solito coppe internazionali. Guarda "
+                                "l'avversario, scegli la nazione dal menù e premi «Applica».")
+                    _kplain = _key(_scelta_sq)  # chiave del NOME SEMPLICE (senza tag)
+                    _plain = df[
+                        (df["squadra_casa"].map(lambda x: _key(x)) == _kplain) |
+                        (df["squadra_trasferta"].map(lambda x: _key(x)) == _kplain)]
+                    if _plain.empty:
+                        st.caption("✅ Nessuna partita col nome semplice da assegnare: tutte "
+                                   "le partite di «" + _scelta_sq + "» hanno già la nazione.")
+                    else:
+                        _rows_c = []
+                        for _, p in _plain.sort_values("data", ascending=False).iterrows():
+                            gc, gt = p.get("gol_casa"), p.get("gol_trasferta")
+                            ris = (f"{int(gc)}-{int(gt)}"
+                                   if (_num_ok(gc) and _num_ok(gt)) else "in attesa")
+                            _rows_c.append({
+                                "id": p.get("id"),
+                                "Data": str(p.get("data"))[:10],
+                                "Casa": p.get("squadra_casa"),
+                                "Trasferta": p.get("squadra_trasferta"),
+                                "Risultato": ris,
+                                "Competizione": _label_da_comp(p.get("competizione"),
+                                                               comp_df_om) or "—",
+                                "Nazione": "—",
+                            })
+                        _vdf_c = pd.DataFrame(_rows_c)
+                        _ed_c = st.data_editor(
+                            _vdf_c, use_container_width=True, hide_index=True,
+                            key=f"om_coppe_{_kplain}",
+                            disabled=["id", "Data", "Casa", "Trasferta", "Risultato",
+                                      "Competizione"],
+                            column_config={
+                                "id": None,
+                                "Nazione": st.column_config.SelectboxColumn(
+                                    "Nazione", options=["—"] + list(nazioni),
+                                    help="Scegli la nazione della squadra in QUESTA partita"),
+                            })
+                        if st.button("✅ Applica assegnazioni", type="primary",
+                                     key=f"om_applica_coppe_{_kplain}"):
+                            _cli = get_client()
+                            _nc = 0
+                            for _, r in _ed_c.iterrows():
+                                naz = _txt(r.get("Nazione"))
+                                if not naz or naz == "—":
+                                    continue
+                                nuovo = f"{_scelta_sq} ({naz})"
+                                orig = df[df["id"] == r["id"]]
+                                if orig.empty:
+                                    continue
+                                orig = orig.iloc[0]
+                                _upd = {}
+                                if _key(orig.get("squadra_casa")) == _kplain:
+                                    _upd["squadra_casa"] = nuovo
+                                if _key(orig.get("squadra_trasferta")) == _kplain:
+                                    _upd["squadra_trasferta"] = nuovo
+                                if _upd:
+                                    try:
+                                        _cli.table("partite").update(_upd).eq(
+                                            "id", r["id"]).execute()
+                                        _nc += 1
+                                    except Exception:
+                                        pass
+                            if _nc:
+                                _invalida_partite()
+                                st.success(f"Assegnate {_nc} partite. Ricarico…")
+                                st.rerun()
+                            else:
+                                st.info("Nessuna nazione selezionata: niente da assegnare. "
+                                        "Scegli la nazione nella colonna «Nazione».")
 
     # === SQUADRE OMONIME - fine ===
     # --- Partite da compilare ---
