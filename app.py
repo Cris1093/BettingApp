@@ -1603,6 +1603,15 @@ def parse_pianificazione(testo):
 
     # marcatori da ignorare tra le squadre e l'orario (non sono competizioni né dati utili)
     _skip = {"srf", "live", "da finire", "posticipata", "rinviata", "sospesa"}
+    # marcatori di RINVIO/SOSPENSIONE: chiudono un blocco come farebbe un orario, ma la
+    # partita NON va salvata (è rinviata) e le righe successive '-' vanno scartate. Senza
+    # questo, il residuo (es. 'Rinv.' + '-') veniva letto come competizione della partita dopo.
+    _postmark = {"post.", "rinv.", "rinv", "rinviata", "posticipata", "sospesa", "sosp.",
+                 "canc.", "annullata", "n.d.", "nd", "a tav.", "a tavolino", "tav.",
+                 "rinviato", "sospeso", "abb.", "abbandonata", "walkover", "w.o.", "wo"}
+
+    def is_marker(x):
+        return x.strip().lower() in _postmark
 
     out = []
     comp_corr, naz_corr = None, None
@@ -1616,14 +1625,24 @@ def parse_pianificazione(testo):
                 res.append(x)
         return res
 
+    def _aggiorna_comp_da_testa(testa):
+        """Se la 'testa' del blocco (ciò che precede le due squadre) contiene una nuova
+        intestazione competizione valida, aggiorna comp_corr/naz_corr. Altrimenti eredita."""
+        nonlocal comp_corr, naz_corr
+        if len(testa) >= 2 and not is_time(testa[-2]) and not is_time(testa[-1]):
+            comp_corr, naz_corr = testa[-2], testa[-1]
+        elif len(testa) == 1 and not is_time(testa[-1]):
+            comp_corr, naz_corr = testa[-1], None
+
     i = 0
     while i < n:
-        # cerca il prossimo ORARIO (àncora affidabile che chiude una partita)
+        # cerca il prossimo TERMINATORE: orario (partita valida) o marcatore di rinvio
+        # (partita rinviata da scartare). Entrambi chiudono un blocco in modo affidabile.
         j = i
-        while j < n and not is_time(righe[j]):
+        while j < n and not is_time(righe[j]) and not is_marker(righe[j]):
             j += 1
         if j >= n:
-            # nessun altro orario: le righe restanti sono intestazioni competizione
+            # nessun altro terminatore: le righe restanti sono intestazioni competizione
             k = i
             while k < n:
                 # coppia nome+nazione (se plausibile), altrimenti avanza
@@ -1631,26 +1650,29 @@ def parse_pianificazione(testo):
                 naz_corr = righe[k + 1] if k + 1 < n else None
                 k += 2
             break
-        # blocco [i .. j-1] = intestazioni + squadre; righe[j] = orario
+        # blocco [i .. j-1] = intestazioni + squadre; righe[j] = terminatore
         blocco = righe[i:j]
         # salta i marcatori (SRF, Live...) in coda al blocco
         blocco = [b for b in blocco if b.strip().lower() not in _skip]
         # le ULTIME righe del blocco sono le squadre (deduplicate); quello prima è intestazione
         deduped = _dedup(blocco)
+
+        if is_marker(righe[j]):
+            # PARTITA RINVIATA: non la salviamo, ma aggiorniamo la competizione se il blocco
+            # portava una nuova intestazione (le sue due squadre non vanno emesse). Poi
+            # saltiamo il marcatore e gli eventuali '-' che lo seguono.
+            if len(deduped) >= 2:
+                _aggiorna_comp_da_testa(deduped[:-2])
+            i = j + 1
+            while i < n and (righe[i].strip() == "-" or is_marker(righe[i])):
+                i += 1
+            continue
+
+        # righe[j] è un ORARIO -> partita valida
         if len(deduped) >= 2:
             casa, trasf = deduped[-2], deduped[-1]
             # ciò che precede le due squadre nel blocco è intestazione competizione
-            testa = deduped[:-2]
-            # aggiorna la competizione SOLO se troviamo una nuova intestazione valida
-            # (non un orario o un marcatore residuo): altrimenti eredita la precedente
-            _nuovo_comp = None
-            _nuovo_naz = None
-            if len(testa) >= 2 and not is_time(testa[-2]) and not is_time(testa[-1]):
-                _nuovo_comp, _nuovo_naz = testa[-2], testa[-1]
-            elif len(testa) == 1 and not is_time(testa[-1]):
-                _nuovo_comp = testa[-1]
-            if _nuovo_comp:
-                comp_corr, naz_corr = _nuovo_comp, _nuovo_naz
+            _aggiorna_comp_da_testa(deduped[:-2])
             # sicurezza: casa/trasf non devono essere orari (blocco malformato) -> scarta
             if is_time(casa) or is_time(trasf):
                 i = j + 1
