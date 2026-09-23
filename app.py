@@ -6866,24 +6866,52 @@ def pagina_console_partite(user):
     def _storico(sq):
         return conteggio.get(_key(sq), 0)
 
-    # costruisci la tabella della console
-    righe = []
+    # set delle squadre inaffidabili (campionati mostrati a intermittenza da diretta): una
+    # partita è "inaffidabile" se ALMENO una delle due squadre vi appartiene — è la stessa
+    # regola con cui motore e snapshot la escludono.
+    try:
+        _inaff = _squadre_inaffidabili()
+    except Exception:
+        _inaff = set()
+
+    def _e_inaffidabile(p):
+        if not _inaff:
+            return False
+        return (_key(_norm_squadra(p.get("squadra_casa"))) in _inaff or
+                _key(_norm_squadra(p.get("squadra_trasferta"))) in _inaff)
+
+    # costruisci le righe, separando affidabili / inaffidabili
+    righe_ok, righe_ko = [], []
     for _, p in giorno.iterrows():
         gc, gt = p.get("gol_casa"), p.get("gol_trasferta")
         ris = (f"{int(gc)}-{int(gt)}" if (_num_ok(gc) and _num_ok(gt)) else "in attesa")
         nh = _storico(p.get("squadra_casa"))
         na = _storico(p.get("squadra_trasferta"))
-        righe.append({
+        r = {
             "Ora": _txt(p.get("ora")),
             "Casa": p.get("squadra_casa"),
             "Trasferta": p.get("squadra_trasferta"),
             "Risultato": ris,
             "Storico": f"{nh}+{na}",
             "Competizione": _label_da_comp(p.get("competizione"), comp_df) or "—",
-        })
-    tab = pd.DataFrame(righe)
-    st.markdown(f"**{len(tab)} partite** il {data_sel:%d/%m/%Y}")
-    st.dataframe(tab, use_container_width=True, hide_index=True)
+        }
+        (righe_ko if _e_inaffidabile(p) else righe_ok).append(r)
+
+    st.markdown(f"**{len(righe_ok) + len(righe_ko)} partite** il {data_sel:%d/%m/%Y}")
+
+    st.markdown(f"#### ✅ Campionati affidabili ({len(righe_ok)})")
+    if righe_ok:
+        st.dataframe(pd.DataFrame(righe_ok), use_container_width=True, hide_index=True)
+    else:
+        st.caption("Nessuna partita di campionati affidabili per questa data.")
+
+    st.markdown(f"#### 🚫 Campionati inaffidabili ({len(righe_ko)})")
+    st.caption("Partite escluse da motore, snapshot e pronostici (almeno una squadra gioca in "
+               "un campionato marcato inaffidabile). Restano nel database.")
+    if righe_ko:
+        st.dataframe(pd.DataFrame(righe_ko), use_container_width=True, hide_index=True)
+    else:
+        st.caption("Nessuna partita inaffidabile per questa data. 👍")
 
     # === VALIDAZIONE CAMPIONATI (tappa 2) ===
     st.divider()
