@@ -597,6 +597,16 @@ def salva_partite(records, preserva_competizione=False):
     cli = get_client()
     if not cli:
         raise RuntimeError("Supabase non configurato.")
+    # DEDUP del batch sulla chiave di conflitto (data, casa, trasferta): Postgres rifiuta un
+    # upsert che contiene due volte la stessa chiave ("ON CONFLICT DO UPDATE command cannot
+    # affect row a second time"). Teniamo l'ULTIMA occorrenza di ogni terna.
+    if records:
+        _visti = {}
+        for r in records:
+            k = (str(r.get("data"))[:10], _txt(r.get("squadra_casa")),
+                 _txt(r.get("squadra_trasferta")))
+            _visti[k] = r  # l'ultima vince
+        records = list(_visti.values())
     if preserva_competizione and records:
         # mappa (data,casa,trasf) -> competizione esistente, per non sovrascriverla
         try:
@@ -714,6 +724,65 @@ def elimina_squadra_ambigua(sid):
     try:
         cli.table("squadre_ambigue").delete().eq("id", sid).execute()
         carica_squadre_ambigue.clear()
+    except Exception:
+        st.cache_data.clear()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def carica_storico_validato():
+    """Squadre il cui storico è stato validato manualmente (per nazione).
+    Ritorna {(key_nome, key_nazione): {'nome','nazione','n_partite','id'}}."""
+    cli = get_client()
+    if not cli:
+        return {}
+    try:
+        rows = cli.table("storico_validato").select("*").execute().data or []
+    except Exception:
+        return {}   # tabella non ancora creata: nessuna validazione
+    out = {}
+    for r in rows:
+        nome = _txt(r.get("squadra"))
+        naz = _txt(r.get("nazione"))
+        if not nome:
+            continue
+        out[(_key(nome), _key(naz))] = {"nome": nome, "nazione": naz,
+                                        "n_partite": r.get("n_partite"), "id": r.get("id")}
+    return out
+
+
+def salva_storico_validato(nome, nazione, n_partite, utente=None):
+    """Registra/aggiorna la validazione dello storico di una squadra per una nazione."""
+    cli = get_client()
+    if not cli:
+        return
+    rec = {"squadra": nome.strip(), "nazione": (nazione or "").strip().upper(),
+           "n_partite": int(n_partite),
+           "aggiornato_il": datetime.utcnow().isoformat()}
+    if utente:
+        rec["validato_da"] = utente
+    try:
+        ex = (cli.table("storico_validato").select("id")
+              .ilike("squadra", nome.strip())
+              .ilike("nazione", rec["nazione"]).execute())
+        if ex.data:
+            cli.table("storico_validato").update(rec).eq("id", ex.data[0]["id"]).execute()
+        else:
+            cli.table("storico_validato").insert(rec).execute()
+    except Exception:
+        pass
+    try:
+        carica_storico_validato.clear()
+    except Exception:
+        st.cache_data.clear()
+
+
+def elimina_storico_validato(vid):
+    cli = get_client()
+    if not cli:
+        return
+    try:
+        cli.table("storico_validato").delete().eq("id", vid).execute()
+        carica_storico_validato.clear()
     except Exception:
         st.cache_data.clear()
 
@@ -1684,6 +1753,167 @@ def parse_pianificazione(testo):
             })
         i = j + 1
     return out
+
+
+def parse_storico(testo, oggi=None):
+    """Parser dell'inserimento storico di UNA squadra. Formato per partita:
+        <competizione>            (intestazione: nome + NAZIONE in maiuscolo, si ripete quando cambia)
+        <NAZIONE>
+        gg.mm.[aaaa]              (data; l'anno può mancare)
+        Casa
+        Casa                      (nome ripetuto 1 o 2 volte)
+        Trasferta
+        Trasferta
+        golCasa
+        golTrasferta
+        [V/N/P]                   (esito della squadra soggetto: facoltativo, usato come controllo)
+    Inferenza anno: si scorre dall'alto (più recenti), anno=corrente; quando scendendo il mese
+    RISALE (es. da gennaio a dicembre) si scala di un anno. Gli anni scritti espliciti vincono e
+    riallineano il contatore.
+    Ritorna dict: {partite, soggetto, competizioni_mancanti_gestite_a_valle, errori}.
+    Ogni partita: {data(ISO), competizione(label), nome_lungo, nazione, casa, trasferta,
+                   gol_casa, gol_trasferta, lettera, riga}."""
+    import datetime as _dt
+    if oggi is None:
+        oggi = _dt.date.today()
+    righe = [r.strip() for r in testo.splitlines()]
+    righe = [r for r in righe if r]
+    n = len(righe)
+
+    _re_data = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})?$")
+
+    def _e_nazione(s):
+        s2 = s.strip()
+        return (len(s2) >= 3 and s2 == s2.upper()
+                and any(c.isalpha() for c in s2) and not s2[0].isdigit())
+
+    def _e_intestazione(k):
+        # riga k = nome competizione se NON è data, la successiva è nazione (maiuscolo) e
+        # non è a sua volta la ripetizione della riga k (che indicherebbe una squadra)
+        if k + 1 >= n:
+            return False
+        return (not _re_data.match(righe[k]) and _e_nazione(righe[k + 1])
+                and not _e_nazione(righe[k]) and righe[k] != righe[k + 1])
+
+    def _dedup(seq):
+        res = []
+        for x in seq:
+            if not res or res[-1] != x:
+                res.append(x)
+        return res
+
+    out = []
+    errori = []
+    comp_corr, naz_corr = None, None
+
+    i = 0
+    while i < n:
+        if _e_intestazione(i):
+            comp_corr, naz_corr = righe[i], righe[i + 1]
+            i += 2
+            continue
+        m = _re_data.match(righe[i])
+        if not m:
+            i += 1  # riga di servizio (lettera V/N/P, resti) -> salta
+            continue
+        # blocco partita: dalla riga dopo la data fino alla prossima data/intestazione
+        gg, mm, aaaa = m.group(1), m.group(2), m.group(3)
+        riga_data = righe[i]
+        j = i + 1
+        chunk = []
+        while j < n and not _re_data.match(righe[j]) and not _e_intestazione(j):
+            chunk.append(righe[j])
+            j += 1
+        # nel chunk: [squadre...] golCasa golTrasferta [lettera]
+        k_int = None
+        for k in range(len(chunk) - 1):
+            if re.fullmatch(r"\d{1,3}", chunk[k]) and re.fullmatch(r"\d{1,3}", chunk[k + 1]):
+                k_int = k
+                break
+        if k_int is None:
+            errori.append(f"Riga «{riga_data}»: risultato (due numeri) non trovato — blocco saltato.")
+            i = j
+            continue
+        nomi = _dedup(chunk[:k_int])
+        if len(nomi) < 2:
+            errori.append(f"Riga «{riga_data}»: due squadre non riconosciute — blocco saltato.")
+            i = j
+            continue
+        casa, trasf = nomi[0], nomi[1]
+        golc, golt = int(chunk[k_int]), int(chunk[k_int + 1])
+        lettera = ""
+        if k_int + 2 < len(chunk):
+            _l = chunk[k_int + 2].strip().upper()
+            if _l in ("V", "N", "P"):
+                lettera = _l
+        out.append({
+            "_gg": int(gg), "_mm": int(mm), "_aaaa": int(aaaa) if aaaa else None,
+            "competizione": label_competizione(comp_corr, naz_corr) or None,
+            "nome_lungo": comp_corr, "nazione": naz_corr,
+            "casa": casa, "trasferta": trasf,
+            "gol_casa": golc, "gol_trasferta": golt,
+            "lettera": lettera, "riga": riga_data,
+        })
+        i = j
+
+    # --- inferenza anno: scorro in ordine (dall'alto = più recente) ---
+    anno = oggi.year
+    prev_mm = None
+    for p in out:
+        if p["_aaaa"] is not None:
+            anno = p["_aaaa"]                 # anno esplicito: vince e riallinea
+        else:
+            if prev_mm is not None and p["_mm"] > prev_mm:
+                anno -= 1                     # il mese è risalito scendendo -> anno precedente
+            # guardia: la partita più recente non può stare nel futuro
+            elif prev_mm is None:
+                try:
+                    if _dt.date(anno, p["_mm"], p["_gg"]) > oggi:
+                        anno -= 1
+                except ValueError:
+                    pass
+        try:
+            p["data"] = _dt.date(anno, p["_mm"], p["_gg"]).isoformat()
+        except ValueError:
+            p["data"] = None
+            errori.append(f"Riga «{p['riga']}»: data non valida.")
+        prev_mm = p["_mm"]
+
+    # --- squadra soggetto: quella presente in TUTTE (o quasi) le partite ---
+    from collections import Counter as _C
+    cnt = _C()
+    for p in out:
+        cnt[_key(p["casa"])] += 1
+        cnt[_key(p["trasferta"])] += 1
+    soggetto = None
+    if out:
+        _kmax, _nmax = cnt.most_common(1)[0]
+        # nome "vero" (non normalizzato) del soggetto
+        for p in out:
+            if _key(p["casa"]) == _kmax:
+                soggetto = p["casa"]; break
+            if _key(p["trasferta"]) == _kmax:
+                soggetto = p["trasferta"]; break
+
+    # --- controllo incrociato lettera V/N/P vs risultato+lato (becca errori di incollaggio) ---
+    if soggetto:
+        ks = _key(soggetto)
+        for p in out:
+            if not p["lettera"]:
+                continue
+            if _key(p["casa"]) == ks:
+                gf, gs = p["gol_casa"], p["gol_trasferta"]
+            elif _key(p["trasferta"]) == ks:
+                gf, gs = p["gol_trasferta"], p["gol_casa"]
+            else:
+                continue
+            atteso = "V" if gf > gs else ("P" if gf < gs else "N")
+            if atteso != p["lettera"]:
+                errori.append(f"Riga «{p['riga']}» ({p['casa']}–{p['trasferta']} "
+                              f"{p['gol_casa']}-{p['gol_trasferta']}): lettera «{p['lettera']}» "
+                              f"non coerente col risultato (atteso «{atteso}»).")
+
+    return {"partite": out, "soggetto": soggetto, "errori": errori}
 
 
 def _similarita(a, b):
@@ -4171,7 +4401,10 @@ def _snapshot_prematch_una(df, comp_df, riga):
     t_key = _key(riga.get("competizione")) if riga.get("competizione") else None
     ph = _partite_squadra_evidenze(df, home, data_p, pid, comp_df, t_liv, t_cat, t_key)
     pa = _partite_squadra_evidenze(df, away, data_p, pid, comp_df, t_liv, t_cat, t_key)
-    if not ph or not pa:
+    # soglia allineata al motore: uno snapshot ML si crea SOLO se ENTRAMBE le squadre hanno
+    # almeno 15 partite precedenti. Evita di inquinare il dataset con avversari dallo storico
+    # incompleto (es. una squadra che compare solo perché citata nello storico di un'altra).
+    if len(ph) < 15 or len(pa) < 15:
         return None
     hcap_h = _handicap_livello(ph, t_liv)
     hcap_a = _handicap_livello(pa, t_liv)
@@ -7023,14 +7256,252 @@ def pagina_console_partite(user):
                    "Per quelle conviene inserire le ultime 15 da 'Ultimi risultati e quote'.")
 
 
+def pagina_inserimento_storico(user):
+    st.header("📚 Inserimento storico squadra")
+    st.caption("Incolla lo storico di UNA squadra (anche fino a ~30 partite). Il sistema rileva "
+               "la squadra, confronta col database e ti dice cosa è nuovo, già presente, in "
+               "conflitto o presente a DB ma non nell'incollato. Poi puoi validare lo storico.")
+    with st.expander("ℹ️ Formato accettato", expanded=False):
+        st.markdown(
+            "```\nSerie D - Girone C\nITALIA\n\n20.09.\nCalvi Noale\nCalvi Noale\nMestre\nMestre"
+            "\n0\n2\nP\n```\n"
+            "- Prima la **competizione** (nome + NAZIONE in maiuscolo), ripetuta quando cambia.\n"
+            "- Poi ogni partita: **data** (l'anno può mancare), le due squadre (ripetute), i due "
+            "gol e, facoltativa, la lettera **V/N/P** (usata come controllo).\n"
+            "- L'anno mancante è dedotto: scendendo, quando il mese risale (gennaio→dicembre) "
+            "si passa all'anno precedente; gli anni scritti vincono.")
+
+    txt = st.text_area("Incolla qui lo storico", key="stor_txt", height=280)
+    c1, c2 = st.columns([1, 1])
+    if c1.button("🔎 Analizza", type="primary"):
+        st.session_state["_stor_go"] = True
+    if c2.button("🧹 Pulisci"):
+        st.session_state.pop("_stor_go", None)
+        st.session_state["stor_txt"] = ""
+        st.rerun()
+    if not st.session_state.get("_stor_go"):
+        return
+    if not txt.strip():
+        st.info("Incolla lo storico e premi «Analizza».")
+        return
+
+    res = parse_storico(txt)
+    partite = [p for p in res["partite"] if p.get("data")]
+    soggetto = res["soggetto"]
+    if not partite or not soggetto:
+        st.warning("Non sono riuscito a riconoscere partite valide. Controlla il formato.")
+        for e in res["errori"]:
+            st.caption("• " + e)
+        return
+
+    comp_df = carica_competizioni()
+    _amb = carica_squadre_ambigue()
+
+    # nazione prevalente (per la validazione della squadra)
+    from collections import Counter as _CC
+    _nz = _CC(_txt(p.get("nazione")) for p in partite if _txt(p.get("nazione")))
+    nazione_sogg = _nz.most_common(1)[0][0] if _nz else ""
+
+    st.success(f"Squadra rilevata: **{soggetto}**"
+               + (f"  ·  nazione **{nazione_sogg}**" if nazione_sogg else "")
+               + f"  ·  **{len(partite)}** partite dal {partite[-1]['data']} al {partite[0]['data']}.")
+
+    if res["errori"]:
+        with st.expander(f"⚠️ {len(res['errori'])} segnalazioni dal controllo", expanded=True):
+            for e in res["errori"]:
+                st.caption("• " + e)
+
+    # --- competizioni mancanti ---
+    known = set()
+    for _, c in comp_df.iterrows():
+        for kk in _chiavi_competizione(c):
+            known.add(kk)
+    mancanti = {}
+    for p in partite:
+        lbl = p.get("competizione")
+        if lbl and _key(lbl) not in known:
+            mancanti[(p.get("nome_lungo"), p.get("nazione"))] = lbl
+    if mancanti:
+        st.warning("Competizioni non presenti a database: "
+                   + ", ".join(sorted(v for v in mancanti.values())))
+        if st.button("➕ Aggiungi competizioni mancanti"):
+            upsert_competizioni([{"nome_lungo": nl, "nazione": na, "categoria": "Non assegnata"}
+                                 for (nl, na) in mancanti.keys()])
+            st.success("Competizioni aggiunte. Assegna categoria/livello in Configurazione.")
+            st.rerun()
+
+    # --- risoluzione nomi (omonime) e diff col DB ---
+    df = carica_partite()
+    db_idx = {}
+    if not df.empty:
+        for _, r in df.iterrows():
+            k = (str(r.get("data"))[:10], _key(r.get("squadra_casa")), _key(r.get("squadra_trasferta")))
+            db_idx[k] = {"gc": r.get("gol_casa"), "gt": r.get("gol_trasferta"), "id": r.get("id")}
+
+    def _risolvi(nome, comp_lbl):
+        # ok=True: risolta col paese (campionato nazionale). ok=False: non ambigua (invariata).
+        # ok="scegli": coppa internazionale -> qui teniamo il nome semplice (storico = campionato).
+        r, ok = risolvi_squadra_ambigua(nome, comp_lbl, comp_df, _amb)
+        return r if ok is True else nome
+
+    righe = []
+    records = []              # da salvare (nuove + conflitti)
+    parsed_keys = set()
+    for p in partite:
+        casa = _risolvi(p["casa"], p["competizione"])
+        trasf = _risolvi(p["trasferta"], p["competizione"])
+        key = (p["data"], _key(casa), _key(trasf))
+        parsed_keys.add(key)
+        db = db_idx.get(key)
+        if db is None:
+            stato = "🆕 nuova"
+            salva = True
+        elif _num_ok(db["gc"]) and _num_ok(db["gt"]) and \
+                int(db["gc"]) == p["gol_casa"] and int(db["gt"]) == p["gol_trasferta"]:
+            stato = "✅ già a DB"
+            salva = False
+        else:
+            _dbris = (f'{int(db["gc"])}-{int(db["gt"])}'
+                      if (_num_ok(db["gc"]) and _num_ok(db["gt"])) else "—")
+            stato = f"⚠️ conflitto (DB {_dbris})"
+            salva = True
+        if salva:
+            records.append({
+                "data": p["data"], "ora": None,
+                "squadra_casa": casa, "squadra_trasferta": trasf,
+                "gol_casa": p["gol_casa"], "gol_trasferta": p["gol_trasferta"],
+                "competizione": p["competizione"],
+                "da_compilare": False, "is_target": False,
+                "inserito_da": user["username"],
+                "aggiornato_il": datetime.utcnow().isoformat(),
+            })
+        righe.append({
+            "Data": p["data"], "Casa": casa, "Trasferta": trasf,
+            "Risultato": f'{p["gol_casa"]}-{p["gol_trasferta"]}',
+            "Competizione": p["competizione"], "Stato": stato,
+        })
+
+    st.markdown("### Confronto col database")
+    st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
+    _nuove = sum(1 for r in righe if r["Stato"].startswith("🆕"))
+    _confl = sum(1 for r in righe if r["Stato"].startswith("⚠️"))
+    _gia = sum(1 for r in righe if r["Stato"].startswith("✅"))
+    st.caption(f"🆕 {_nuove} nuove · ⚠️ {_confl} in conflitto (il salvataggio userà il risultato "
+               f"incollato) · ✅ {_gia} già presenti.")
+
+    if records:
+        if st.button(f"💾 Salva {len(records)} partite (nuove + conflitti)", type="primary"):
+            try:
+                salva_partite(records, preserva_competizione=True)
+                st.success(f"Salvate {len(records)} partite nello storico.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Errore nel salvataggio: {e}")
+    else:
+        st.info("Nessuna partita nuova o in conflitto da salvare: lo storico incollato è già a DB.")
+
+    # --- partite a DB ma NON nell'incollato (nella finestra del soggetto) ---
+    ks = _key(soggetto)
+    dmin, dmax = partite[-1]["data"], partite[0]["data"]
+    labels_paste = {_key(p["competizione"]) for p in partite if p.get("competizione")}
+    orfane = []
+    if not df.empty:
+        for _, r in df.iterrows():
+            d10 = str(r.get("data"))[:10]
+            if not (dmin <= d10 <= dmax):
+                continue
+            if ks not in (_key(r.get("squadra_casa")), _key(r.get("squadra_trasferta"))):
+                continue
+            if labels_paste and _key(_txt(r.get("competizione"))) not in labels_paste:
+                continue
+            k = (d10, _key(r.get("squadra_casa")), _key(r.get("squadra_trasferta")))
+            if k in parsed_keys:
+                continue
+            gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
+            orfane.append({
+                "id": r.get("id"), "Data": d10,
+                "Casa": r.get("squadra_casa"), "Trasferta": r.get("squadra_trasferta"),
+                "Risultato": (f"{int(gc)}-{int(gt)}" if (_num_ok(gc) and _num_ok(gt)) else "—"),
+                "Competizione": _label_da_comp(r.get("competizione"), comp_df) or "—",
+                "🗑️": False,
+            })
+    if orfane:
+        st.markdown("### A database ma non nell'incollato")
+        st.caption("Partite del soggetto nella finestra di date/competizione incollata che NON "
+                   "compaiono nel tuo testo. Spunta 🗑️ per cancellarle. **Attenzione**: la "
+                   "cancellazione toglie la partita anche dallo storico dell'avversario.")
+        _edo = st.data_editor(pd.DataFrame(orfane), use_container_width=True, hide_index=True,
+                              key="stor_orfane", disabled=["id", "Data", "Casa", "Trasferta",
+                                                            "Risultato", "Competizione"],
+                              column_config={"id": None,
+                                             "🗑️": st.column_config.CheckboxColumn("🗑️")})
+        _da_el = [r["id"] for _, r in _edo.iterrows() if r["🗑️"]]
+        if _da_el:
+            if st.button(f"🗑️ Elimina {len(_da_el)} partite selezionate", key="stor_del"):
+                try:
+                    elimina_partite(_da_el)
+                    st.success(f"Eliminate {len(_da_el)} partite.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Errore: {e}")
+
+    # --- validazione dello storico del soggetto ---
+    st.divider()
+    st.markdown("### ✅ Validazione storico")
+    _valid = carica_storico_validato()
+    _n_db_sogg = 0
+    if not df.empty:
+        _n_db_sogg = int(((df["squadra_casa"].map(_key) == ks) |
+                          (df["squadra_trasferta"].map(_key) == ks)).sum())
+    _gia_val = _valid.get((_key(soggetto), _key(nazione_sogg)))
+    if _gia_val:
+        st.success(f"«{soggetto}» ({nazione_sogg}) è già validata "
+                   f"({_gia_val.get('n_partite')} partite al momento della validazione).")
+    st.caption(f"A DB il soggetto ha attualmente **{_n_db_sogg}** partite. La validazione è "
+               "un'etichetta di fiducia: non blocca i motori (serve comunque il minimo di 15 "
+               "partite su entrambe le squadre).")
+    if st.button(f"✅ Valida storico di «{soggetto}» ({nazione_sogg or 'n.d.'})"):
+        salva_storico_validato(soggetto, nazione_sogg, _n_db_sogg, user["username"])
+        st.success("Storico validato.")
+        st.rerun()
+
+    # --- vista avversari (solo informativa, nessun cascade) ---
+    st.divider()
+    st.markdown("### Avversari incontrati")
+    st.caption("Conteggio storico a DB e stato di validazione di ogni avversario. Serve solo a "
+               "decidere quali altre squadre valga la pena popolare (gli snapshot ML si creano "
+               "solo quando ENTRAMBE hanno ≥15 partite).")
+    avv = {}
+    for p in partite:
+        for lato in ("casa", "trasferta"):
+            nm = _risolvi(p[lato], p["competizione"])
+            if _key(nm) == ks:
+                continue
+            avv.setdefault(_key(nm), nm)
+    if not df.empty:
+        _kc_all = df["squadra_casa"].map(_key)
+        _kt_all = df["squadra_trasferta"].map(_key)
+    riep = []
+    for kk, nm in sorted(avv.items(), key=lambda x: x[1]):
+        n = 0
+        if not df.empty:
+            n = int(((_kc_all == kk) | (_kt_all == kk)).sum())
+        val = any(vk[0] == kk for vk in _valid.keys())
+        riep.append({"Avversario": nm, "Storico a DB": n,
+                     "Pronosticabile (≥15)": "sì" if n >= 15 else "no",
+                     "Validata": "✅" if val else "—"})
+    if riep:
+        st.dataframe(pd.DataFrame(riep), use_container_width=True, hide_index=True)
+
+
 def main():
     user = login_gate()
 
     with st.sidebar:
         st.markdown(f"**Utente:** {user['username']}  \n_ruolo: {user['ruolo']}_")
         _voci = ["📥 Ultimi risultati e quote", "📊 Estrattore risultati",
-                 "🗓️ Estrattore pianificazione", "🎛️ Console partite",
-                 "🔮 Analisi & Pronostico",
+                 "🗓️ Estrattore pianificazione", "📚 Inserimento storico",
+                 "🎛️ Console partite", "🔮 Analisi & Pronostico",
                  "📈 Storico pronostici", "🧪 Backtest",
                  "🗄️ Database", "⚙️ Configurazione", "🔧 Diagnostica"]
         # navigazione forzata dalla Console ("→ Pronostico"): porta all'Analisi
@@ -7045,6 +7516,7 @@ def main():
         "📥": ("Estrattore ultimi risultati", pagina_estrattore),
         "📊": ("Estrattore risultati", pagina_estrattore_risultati),
         "🗓️": ("Estrattore pianificazione", pagina_estrattore_pianificazione),
+        "📚": ("Inserimento storico", pagina_inserimento_storico),
         "🎛️": ("Console partite", pagina_console_partite),
         "🔮": ("Analisi & Pronostico", pagina_analisi),
         "📈": ("Storico pronostici", pagina_storico_pronostici),
