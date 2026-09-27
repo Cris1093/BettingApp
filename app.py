@@ -1824,28 +1824,30 @@ def parse_storico(testo, oggi=None):
         while j < n and not _re_data.match(righe[j]) and not _e_intestazione(j):
             chunk.append(righe[j])
             j += 1
-        # nel chunk: [squadre...] golCasa golTrasferta [lettera]
-        k_int = None
-        for k in range(len(chunk) - 1):
-            if re.fullmatch(r"\d{1,3}", chunk[k]) and re.fullmatch(r"\d{1,3}", chunk[k + 1]):
-                k_int = k
-                break
-        if k_int is None:
+        # nel chunk: [squadre... con eventuali numeri VAGANTI] golCasa golTrasferta [lettera]
+        # Robustezza: il RISULTATO sono gli ULTIMI due token interi del blocco; le SQUADRE
+        # sono i token NON interi (deduplicati). Così un numero vagante tra le squadre
+        # (es. 'Ferro / Ferro / 2 / Almagro / Almagro / 1 / 1') non rompe l'allineamento.
+        def _e_int(v):
+            return re.fullmatch(r"\d{1,3}", v.strip()) is not None
+        # stacca una eventuale lettera esito finale (V/N/P) in coda
+        lettera = ""
+        clean = list(chunk)
+        while clean and clean[-1].strip().upper() in ("V", "N", "P"):
+            lettera = clean[-1].strip().upper()
+            clean = clean[:-1]
+        pos_int = [k for k, v in enumerate(clean) if _e_int(v)]
+        if len(pos_int) < 2:
             errori.append(f"Riga «{riga_data}»: risultato (due numeri) non trovato — blocco saltato.")
             i = j
             continue
-        nomi = _dedup(chunk[:k_int])
+        golc, golt = int(clean[pos_int[-2]]), int(clean[pos_int[-1]])
+        nomi = _dedup([v for v in clean if not _e_int(v)])
         if len(nomi) < 2:
             errori.append(f"Riga «{riga_data}»: due squadre non riconosciute — blocco saltato.")
             i = j
             continue
         casa, trasf = nomi[0], nomi[1]
-        golc, golt = int(chunk[k_int]), int(chunk[k_int + 1])
-        lettera = ""
-        if k_int + 2 < len(chunk):
-            _l = chunk[k_int + 2].strip().upper()
-            if _l in ("V", "N", "P"):
-                lettera = _l
         out.append({
             "_gg": int(gg), "_mm": int(mm), "_aaaa": int(aaaa) if aaaa else None,
             "competizione": label_competizione(comp_corr, naz_corr) or None,
