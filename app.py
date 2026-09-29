@@ -1559,15 +1559,21 @@ def parse_risultati(testo):
                     i += 1
                 continue
             # squadre ripetute ma SENZA due numeri validi = partita RINVIATA/POSTICIPATA
-            # (es. "Levante, Levante, Ath. Bilbao, Ath. Bilbao, Post., -, -"): salta le 4 righe
-            # squadre, poi salta SOLO i marcatori noti di rinvio (Post., -, ecc.), fermandoti
-            # appena trovi altro (nuova squadra o intestazione) per non disallineare.
+            # oppure NON ANCORA GIOCATA (mostrata con 'SRF' + orario di inizio, es.
+            # "Qatar U19, Qatar U19, Azerbaigian U19, Azerbaigian U19, SRF, 16:30").
+            # Salta le 4 righe squadre, poi assorbe i marcatori di rinvio, i marcatori di
+            # stato (SRF/Live/…) e un eventuale orario (HH:MM), fermandoti appena trovi altro
+            # (nuova squadra o intestazione) per non disallineare. Senza questo, 'SRF' + '16:30'
+            # venivano riletti come intestazione competizione delle partite successive.
             i = i + 4
             _marcatori = {"-", "post.", "rinv.", "rinviata", "posticipata", "sospesa",
                           "canc.", "annullata", "n.d.", "nd", "a tav.", "a tavolino",
                           "tav.", "rinviato", "sospeso", "abb.", "abbandonata", "walkover",
-                          "w.o.", "wo"}
-            while i < n and righe[i].strip().lower() in _marcatori:
+                          "w.o.", "wo", "srf", "live", "da finire"}
+
+            def _e_orario(x):
+                return re.fullmatch(r"\d{1,2}:\d{2}", x.strip()) is not None
+            while i < n and (righe[i].strip().lower() in _marcatori or _e_orario(righe[i])):
                 i += 1
             continue
         # blocco MALFORMATO: casa, casa, trasf (NON ripetuta), gol, gol
