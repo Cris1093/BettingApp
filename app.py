@@ -1681,9 +1681,15 @@ def parse_pianificazione(testo):
     # marcatori di RINVIO/SOSPENSIONE: chiudono un blocco come farebbe un orario, ma la
     # partita NON va salvata (è rinviata) e le righe successive '-' vanno scartate. Senza
     # questo, il residuo (es. 'Rinv.' + '-') veniva letto come competizione della partita dopo.
+    # include "da finire": partita sospesa in data passata e ripresa oggi, mostrata con
+    # punteggio parziale e SENZA orario di inizio (es. "Recoleta, Recoleta, Libertad, Libertad,
+    # Da finire, 1, 1"). Va trattata come una rinviata: chiude il blocco, non si salva, e i
+    # numeri del parziale che seguono vanno scartati (altrimenti 'Libertad' + '1' finivano letti
+    # come competizione della partita successiva).
     _postmark = {"post.", "rinv.", "rinv", "rinviata", "posticipata", "sospesa", "sosp.",
                  "canc.", "annullata", "n.d.", "nd", "a tav.", "a tavolino", "tav.",
-                 "rinviato", "sospeso", "abb.", "abbandonata", "walkover", "w.o.", "wo"}
+                 "rinviato", "sospeso", "abb.", "abbandonata", "walkover", "w.o.", "wo",
+                 "da finire"}
 
     def is_marker(x):
         return x.strip().lower() in _postmark
@@ -1739,7 +1745,10 @@ def parse_pianificazione(testo):
             if len(deduped) >= 2:
                 _aggiorna_comp_da_testa(deduped[:-2])
             i = j + 1
-            while i < n and (righe[i].strip() == "-" or is_marker(righe[i])):
+            # salta '-', altri marcatori e gli eventuali NUMERI del punteggio parziale
+            # (caso "Da finire … 1 1"), fermandoti alla squadra/intestazione successiva
+            while i < n and (righe[i].strip() == "-" or is_marker(righe[i])
+                             or re.fullmatch(r"\d{1,3}", righe[i].strip())):
                 i += 1
             continue
 
