@@ -7192,10 +7192,16 @@ def pagina_console_partite(user):
         st.caption(f"{len(da_validare)} campionati da validare:")
         _cats = ["Campionato", "Coppa nazionale", "Coppa internazionale", "Playoff",
                  "Torneo secondario", "Amichevole", "Altro", "Non assegnata"]
+        _used_kk = set()
         for _idx, (code, riga_comp) in enumerate(da_validare):
             # KEY STABILE basata sul codice competizione (non sull'indice): evita che i
-            # campi si "sfalsino" tra un refresh e l'altro quando la lista cambia ordine
+            # campi si "sfalsino" tra un refresh e l'altro quando la lista cambia ordine.
+            # Se due codici diversi producono lo stesso slug (o per il taglio a 60 caratteri),
+            # disambiguo con l'indice per evitare StreamlitDuplicateElementKey.
             _kk = re.sub(r"[^a-z0-9]", "_", _key(code))[:60] or f"c{_idx}"
+            if _kk in _used_kk:
+                _kk = f"{_kk}_{_idx}"
+            _used_kk.add(_kk)
             with st.container(border=True):
                 # valori attuali (se il campionato è già a DB) o proposti (se nuovo)
                 if riga_comp is not None:
