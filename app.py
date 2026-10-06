@@ -889,36 +889,46 @@ def elimina_competizione(cid):
 
 def _salva_competizione_validata(rec):
     """Salva/aggiorna una competizione col flag 'validato'. Ritorna (ok, messaggio).
-    Se la colonna 'validato' non esiste nel DB, lo segnala esplicitamente (niente fallback
-    silenzioso: prima salvava senza flag e la competizione ricompariva)."""
+    A prova di DUPLICATI: individua TUTTE le righe che rappresentano la stessa competizione
+    (stesso nome+nazione, stessa etichetta 'Nome | NAZIONE' anche se tenuta tutta in
+    nome_lungo, o stesso nome corto) e marca validato=True su OGNUNA. Così la Console non la
+    ripropone perché ne incontra una copia non validata.
+    Se la colonna 'validato' non esiste nel DB, lo segnala esplicitamente."""
     cli = get_client()
     if not cli:
         return False, "Supabase non configurato."
-    if not rec.get("id"):
-        # cerca una competizione ESISTENTE con lo stesso nome+nazione (o nome corto) per
-        # AGGIORNARLA invece di crearne una nuova (evita i duplicati)
-        try:
-            esist = cli.table("competizioni").select("id,nome_lungo,nazione,nome_corto").execute().data or []
-        except Exception:
-            esist = []
-        _mk = lambda nl, na: (_key(_txt(nl)), _key(_txt(na)))
-        # etichetta attesa "Nome | NAZIONE" del record da salvare, per intercettare anche le
-        # righe vecchie/malformate che tengono l'intera etichetta dentro nome_lungo
-        _lbl_rec = _key(label_competizione(rec.get("nome_lungo"), rec.get("nazione")))
-        found = None
-        for e in esist:
-            if _mk(e.get("nome_lungo"), e.get("nazione")) == _mk(rec.get("nome_lungo"), rec.get("nazione")):
-                found = e.get("id"); break
-            # match per etichetta: copre il caso nome_lungo="Nome | NAZIONE", nazione vuota
-            if _lbl_rec and _key(label_competizione(e.get("nome_lungo"), e.get("nazione"))) == _lbl_rec:
-                found = e.get("id"); break
-            if _lbl_rec and _key(_txt(e.get("nome_lungo"))) == _lbl_rec:
-                found = e.get("id"); break
-            if _txt(rec.get("nome_corto")) and _key(_txt(e.get("nome_corto"))) == _key(_txt(rec.get("nome_corto"))):
-                found = e.get("id"); break
-        rec["id"] = found or str(uuid.uuid4())
     try:
-        cli.table("competizioni").upsert(rec).execute()
+        esist = cli.table("competizioni").select(
+            "id,nome_lungo,nazione,nome_corto").execute().data or []
+    except Exception:
+        esist = []
+    _mk = lambda nl, na: (_key(_txt(nl)), _key(_txt(na)))
+    _lbl_rec = _key(label_competizione(rec.get("nome_lungo"), rec.get("nazione")))
+    _nc_rec = _key(_txt(rec.get("nome_corto")))
+
+    def _e_la_stessa(e):
+        if _mk(e.get("nome_lungo"), e.get("nazione")) == _mk(rec.get("nome_lungo"), rec.get("nazione")):
+            return True
+        if _lbl_rec and _key(label_competizione(e.get("nome_lungo"), e.get("nazione"))) == _lbl_rec:
+            return True
+        if _lbl_rec and _key(_txt(e.get("nome_lungo"))) == _lbl_rec:
+            return True
+        if _nc_rec and _key(_txt(e.get("nome_corto"))) == _nc_rec:
+            return True
+        return False
+
+    duplicati = [e.get("id") for e in esist if _e_la_stessa(e)]
+    try:
+        if duplicati:
+            # aggiorna la riga "principale" con i dati validati e marca validato su tutte
+            rec["id"] = rec.get("id") or duplicati[0]
+            cli.table("competizioni").upsert(rec).execute()
+            altri = [d for d in duplicati if d and d != rec["id"]]
+            if altri:
+                cli.table("competizioni").update({"validato": True}).in_("id", altri).execute()
+        else:
+            rec["id"] = rec.get("id") or str(uuid.uuid4())
+            cli.table("competizioni").upsert(rec).execute()
         st.cache_data.clear()
         return True, None
     except Exception as e:
