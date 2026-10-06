@@ -902,9 +902,17 @@ def _salva_competizione_validata(rec):
         except Exception:
             esist = []
         _mk = lambda nl, na: (_key(_txt(nl)), _key(_txt(na)))
+        # etichetta attesa "Nome | NAZIONE" del record da salvare, per intercettare anche le
+        # righe vecchie/malformate che tengono l'intera etichetta dentro nome_lungo
+        _lbl_rec = _key(label_competizione(rec.get("nome_lungo"), rec.get("nazione")))
         found = None
         for e in esist:
             if _mk(e.get("nome_lungo"), e.get("nazione")) == _mk(rec.get("nome_lungo"), rec.get("nazione")):
+                found = e.get("id"); break
+            # match per etichetta: copre il caso nome_lungo="Nome | NAZIONE", nazione vuota
+            if _lbl_rec and _key(label_competizione(e.get("nome_lungo"), e.get("nazione"))) == _lbl_rec:
+                found = e.get("id"); break
+            if _lbl_rec and _key(_txt(e.get("nome_lungo"))) == _lbl_rec:
                 found = e.get("id"); break
             if _txt(rec.get("nome_corto")) and _key(_txt(e.get("nome_corto"))) == _key(_txt(rec.get("nome_corto"))):
                 found = e.get("id"); break
@@ -7173,16 +7181,24 @@ def pagina_console_partite(user):
     comps_giorno = [c for c in giorno["competizione"].dropna().unique() if _txt(c)]
     # stato validazione per ognuna
     _val_col = "validato" in comp_df.columns if not comp_df.empty else False
+    if not comp_df.empty and not _val_col:
+        st.warning("⚠️ La colonna **validato** non esiste ancora su Supabase: la validazione "
+                   "non può essere memorizzata (i campionati ricompaiono ogni volta). "
+                   "Lancia nel SQL editor di Supabase:\n\n"
+                   "```sql\nalter table competizioni add column if not exists "
+                   "validato boolean default false;\n```")
     da_validare = []
     for code in comps_giorno:
-        riga_comp = None
+        k = _key(code)
+        # TUTTE le righe competizione che combaciano con questo codice (possono essercene più
+        # di una se ci sono duplicati storici). È validato se ANCHE SOLO UNA è validata.
+        matching = []
         if not comp_df.empty:
-            k = _key(code)
             for _, c in comp_df.iterrows():
                 if k in _chiavi_competizione(c):
-                    riga_comp = c
-                    break
-        gia_validato = bool(riga_comp is not None and _val_col and riga_comp.get("validato"))
+                    matching.append(c)
+        riga_comp = matching[0] if matching else None
+        gia_validato = bool(_val_col and any(bool(c.get("validato")) for c in matching))
         if not gia_validato:
             da_validare.append((code, riga_comp))
 
