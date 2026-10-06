@@ -902,18 +902,20 @@ def _salva_competizione_validata(rec):
             "id,nome_lungo,nazione,nome_corto").execute().data or []
     except Exception:
         esist = []
+    # IDENTITÀ di una competizione = nome lungo + nazione (etichetta "Nome | NAZIONE").
+    # Il NOME CORTO (es. 'EUR') NON è un'identità: è condiviso da competizioni diverse, quindi
+    # usarlo qui farebbe scrivere il flag sulla riga sbagliata (bug delle validazioni che
+    # restano in lista). Perciò NON si abbina mai per nome corto.
     _mk = lambda nl, na: (_key(_txt(nl)), _key(_txt(na)))
     _lbl_rec = _key(label_competizione(rec.get("nome_lungo"), rec.get("nazione")))
-    _nc_rec = _key(_txt(rec.get("nome_corto")))
 
     def _e_la_stessa(e):
         if _mk(e.get("nome_lungo"), e.get("nazione")) == _mk(rec.get("nome_lungo"), rec.get("nazione")):
             return True
         if _lbl_rec and _key(label_competizione(e.get("nome_lungo"), e.get("nazione"))) == _lbl_rec:
             return True
+        # riga vecchia/malformata: etichetta intera dentro nome_lungo, nazione vuota
         if _lbl_rec and _key(_txt(e.get("nome_lungo"))) == _lbl_rec:
-            return True
-        if _nc_rec and _key(_txt(e.get("nome_corto"))) == _nc_rec:
             return True
         return False
 
