@@ -1539,11 +1539,13 @@ def _campionati_vuoti(testo, partite_trovate):
     return vuoti
 
 
-def parse_risultati(testo):
+def parse_risultati(testo, raccogli_posticipate=False):
     """Parsa il formato a blocchi per competizione.
     Ritorna lista di dict: competizione(label), nazione, casa, trasferta, qualificatore, gol_casa, gol_trasferta.
     Ogni match = squadra_casa (x2), squadra_trasferta (x2), [qualificatore], gol_casa, gol_trasferta.
-    Le righe non-match (2 consecutive) sono l'intestazione competizione: nome + nazione."""
+    Le righe non-match (2 consecutive) sono l'intestazione competizione: nome + nazione.
+    Se raccogli_posticipate=True ritorna (risultati, posticipate): 'posticipate' sono le partite
+    marcate Post./Rinv./Sosp./ecc. SENZA risultato (per poterle cancellare dallo storico)."""
     righe = [r.strip() for r in testo.splitlines()]
     righe = [r for r in righe if r]  # via le righe vuote
     n = len(righe)
@@ -1551,7 +1553,14 @@ def parse_risultati(testo):
     def is_int(x):
         return re.fullmatch(r"\d+", re.sub(r"\(.*?\)", "", x).strip()) is not None
 
+    # marcatori di partita NON giocata da trattare come POSTICIPATA (non SRF/orario/live, che
+    # indicano solo 'non ancora iniziata' e non vanno cancellate)
+    _post_veri = {"post.", "rinv.", "rinviata", "posticipata", "sospesa", "sosp.", "canc.",
+                  "annullata", "rinviato", "sospeso", "abb.", "abbandonata", "a tav.",
+                  "a tavolino", "tav.", "walkover", "w.o.", "wo"}
+
     risultati = []
+    posticipate = []
     comp_corr, naz_corr = None, None
     i = 0
     while i < n:
@@ -1585,6 +1594,14 @@ def parse_risultati(testo):
             # stato (SRF/Live/…) e un eventuale orario (HH:MM), fermandoti appena trovi altro
             # (nuova squadra o intestazione) per non disallineare. Senza questo, 'SRF' + '16:30'
             # venivano riletti come intestazione competizione delle partite successive.
+            # registra la partita come POSTICIPATA se il marcatore è di rinvio/sospensione
+            _marc0 = righe[i + 4].strip().lower() if i + 4 < n else ""
+            if _marc0 in _post_veri:
+                posticipate.append({
+                    "competizione": label_competizione(comp_corr, naz_corr) or None,
+                    "nome_lungo": comp_corr, "nazione": naz_corr,
+                    "casa": casa, "trasferta": trasf, "marcatore": righe[i + 4].strip(),
+                })
             i = i + 4
             _marcatori = {"-", "post.", "rinv.", "rinviata", "posticipata", "sospesa",
                           "canc.", "annullata", "n.d.", "nd", "a tav.", "a tavolino",
@@ -1683,6 +1700,8 @@ def parse_risultati(testo):
         comp_corr = righe[i]
         naz_corr = righe[i + 1] if i + 1 < n else None
         i += 2
+    if raccogli_posticipate:
+        return risultati, posticipate
     return risultati
 
 
@@ -3574,7 +3593,7 @@ def pagina_estrattore_risultati(user):
         st.info("In attesa dei risultati…")
         return
 
-    risultati = parse_risultati(testo)
+    risultati, posticipate = parse_risultati(testo, raccogli_posticipate=True)
     if not risultati:
         st.warning("Nessun risultato riconosciuto.")
         return
@@ -3632,6 +3651,27 @@ def pagina_estrattore_risultati(user):
         part = part.copy()
         part["_c"] = part["squadra_casa"].map(lambda x: _key(_norm_squadra(x)))
         part["_t"] = part["squadra_trasferta"].map(lambda x: _key(_norm_squadra(x)))
+
+    # --- PARTITE POSTICIPATE: se erano già pianificate nel DB (stessa data, in attesa),
+    # proponi di cancellarle (restano altrimenti nello storico senza risultato) ---
+    post_da_cancellare = []   # (label, id)
+    for pp in posticipate:
+        nc, nt = _key(_norm_squadra(pp["casa"])), _key(_norm_squadra(pp["trasferta"]))
+        if part.empty:
+            continue
+        cand = part[(part["_c"] == nc) & (part["_t"] == nt)]
+        cand = cand[cand["gol_casa"].isna()]    # solo fixture ancora in attesa
+        for _, p in cand.iterrows():
+            post_da_cancellare.append(
+                (f'{_norm_squadra(pp["casa"])} - {_norm_squadra(pp["trasferta"])} '
+                 f'({pp["marcatore"]})', p["id"]))
+    canc_post = False
+    if post_da_cancellare:
+        st.warning(f"🗓️ **{len(post_da_cancellare)} partite posticipate** che risultano già "
+                   "pianificate nel database (resterebbero nello storico senza risultato):\n\n"
+                   + "\n".join(f"• {lbl}" for lbl, _ in post_da_cancellare))
+        canc_post = st.checkbox("🗑️ Cancella dallo storico queste partite posticipate",
+                                value=True, key="er_canc_post")
 
     righe, meta = [], []
     for r in risultati:
@@ -3824,6 +3864,15 @@ def pagina_estrattore_risultati(user):
                     "aggiornato_il": datetime.utcnow().isoformat(),
                 })
 
+        # 4) cancella le partite posticipate già pianificate (se richiesto)
+        _n_canc = 0
+        if canc_post and post_da_cancellare:
+            try:
+                elimina_partite([pid for _, pid in post_da_cancellare])
+                _n_canc = len(post_da_cancellare)
+            except Exception:
+                _n_canc = 0
+
         try:
             if updates:
                 aggiorna_partite(updates)
@@ -3838,6 +3887,7 @@ def pagina_estrattore_risultati(user):
             st.success(
                 f"Agganciati {len(updates)} risultati a partite esistenti."
                 + (f" Create {len(nuove_partite)} partite nuove nello storico." if nuove_partite else "")
+                + (f" Cancellate {_n_canc} partite posticipate." if _n_canc else "")
                 + (f" Aggiornati {_sync} pronostici." if _sync else "")
                 + (f" Aggiunte {len(nuove)} competizioni." if nuove else ""))
         except Exception as e:
