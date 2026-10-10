@@ -787,6 +787,67 @@ def elimina_storico_validato(vid):
         st.cache_data.clear()
 
 
+# =============================================================================
+#  OMONIME PER DIVISIONE (stesso nome + stessa nazione, campionati diversi)
+#  Es. 'Ried' in Bundesliga AUSTRIA e 'Ried' in Regionalliga North AUSTRIA: due squadre
+#  diverse con nome e nazione identici. Si distinguono SOLO dalla competizione, quindi si
+#  mappa (nome_base, competizione) -> nome_taggato (es. 'Ried (Bundesliga)').
+# =============================================================================
+@st.cache_data(ttl=600, show_spinner=False)
+def carica_omonime_divisione():
+    """Ritorna la mappa {(key_nome_base, key_competizione): nome_taggato}. Tabella assente =
+    nessuna mappa (feature non ancora configurata)."""
+    cli = get_client()
+    if not cli:
+        return {}
+    try:
+        rows = cli.table("omonime_divisione").select("*").execute().data or []
+    except Exception:
+        return {}
+    out = {}
+    for r in rows:
+        nb = _txt(r.get("nome_base"))
+        cp = _txt(r.get("competizione"))
+        tg = _txt(r.get("nome_taggato"))
+        if nb and cp and tg:
+            out[(_key(nb), _key(cp))] = tg
+    return out
+
+
+def salva_omonima_divisione(nome_base, competizione, nome_taggato):
+    """Registra/aggiorna una regola (nome_base + competizione -> nome_taggato)."""
+    cli = get_client()
+    if not cli:
+        return
+    rec = {"nome_base": nome_base.strip(), "competizione": _txt(competizione),
+           "nome_taggato": nome_taggato.strip(),
+           "aggiornato_il": datetime.utcnow().isoformat()}
+    try:
+        ex = (cli.table("omonime_divisione").select("id")
+              .ilike("nome_base", nome_base.strip())
+              .ilike("competizione", _txt(competizione)).execute())
+        if ex.data:
+            cli.table("omonime_divisione").update(rec).eq("id", ex.data[0]["id"]).execute()
+        else:
+            cli.table("omonime_divisione").insert(rec).execute()
+    except Exception:
+        pass
+    try:
+        carica_omonime_divisione.clear()
+    except Exception:
+        st.cache_data.clear()
+
+
+def applica_tag_divisione(nome, competizione, mappa=None):
+    """Se esiste una regola per (nome, competizione), restituisce il nome taggato; altrimenti
+    il nome invariato. Serve a taggare in automatico le partite future (estrattori/storico)."""
+    if mappa is None:
+        mappa = carica_omonime_divisione()
+    if not mappa:
+        return nome
+    return mappa.get((_key(_norm_squadra(nome)), _key(_txt(competizione))), nome)
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def carica_competizioni():
     cli = get_client()
@@ -3230,6 +3291,79 @@ def pagina_database(user):
                                         "«Assegna a».")
 
     # === SQUADRE OMONIME - fine ===
+
+    # === OMONIME STESSO PAESE, DIVISIONI DIVERSE ===
+    with st.expander("🏳️ Omonime stesso paese (divisioni diverse)"):
+        st.caption("Due squadre con lo STESSO nome nella STESSA nazione ma in campionati diversi "
+                   "(es. «Ried» in Bundesliga e in Regionalliga North). Il tag nazione non basta "
+                   "a separarle: scegli la squadra, assegna un tag a ogni competizione e il "
+                   "sistema rinomina le partite e ricorda la regola per quelle future.")
+        _sqd = st.text_input("Nome squadra da separare (nome esatto)", key="omdiv_nome",
+                             placeholder="es. Ried")
+        if _sqd and _sqd.strip():
+            base = _sqd.strip()
+            kbase = _key(base)
+            mine = df[(df["squadra_casa"].map(_key) == kbase) |
+                      (df["squadra_trasferta"].map(_key) == kbase)]
+            if mine.empty:
+                st.info(f"Nessuna partita trovata col nome esatto «{base}». "
+                        "Se è già stata taggata, cerca il nome base originale.")
+            else:
+                from collections import Counter as _Cdiv
+                _cc = _Cdiv(_txt(c) for c in mine["competizione"] if _txt(c))
+                _map_exist = carica_omonime_divisione()
+                _rows_d = []
+                for comp, nconf in sorted(_cc.items(), key=lambda x: -x[1]):
+                    _tagpre = _map_exist.get((kbase, _key(comp)), "")
+                    _suf = ""
+                    _mm = re.search(r"\(([^)]+)\)\s*$", _tagpre)
+                    if _mm:
+                        _suf = _mm.group(1)
+                    _rows_d.append({"Competizione": comp, "Partite": nconf, "Tag": _suf})
+                _ed_d = st.data_editor(
+                    pd.DataFrame(_rows_d), use_container_width=True, hide_index=True,
+                    key=f"omdiv_ed_{kbase}", disabled=["Competizione", "Partite"],
+                    column_config={"Tag": st.column_config.TextColumn(
+                        "Tag", help="Es. Bundesliga, Regionalliga. Vuoto = lascia il nome "
+                                    "semplice. Stesso tag su più competizioni = stessa squadra "
+                                    "(metti il tag della coppa uguale a quello del campionato).")})
+                st.caption(f"Il nome diventerà «{base} (tag)». Le competizioni con lo STESSO tag "
+                           "finiscono sotto la stessa squadra.")
+                if st.button("✏️ Applica e salva regole", type="primary",
+                             key=f"omdiv_apply_{kbase}"):
+                    _clid = get_client()
+                    _aggd, _regd = 0, 0
+                    for _, r in _ed_d.iterrows():
+                        tag = _txt(r.get("Tag"))
+                        comp = _txt(r.get("Competizione"))
+                        if not tag or not comp:
+                            continue
+                        nuovo = f"{base} ({tag})"
+                        salva_omonima_divisione(base, comp, nuovo)
+                        _regd += 1
+                        _sub = mine[mine["competizione"].map(lambda x: _key(_txt(x))) == _key(comp)]
+                        for _, p in _sub.iterrows():
+                            _updd = {}
+                            if _key(p.get("squadra_casa")) == kbase:
+                                _updd["squadra_casa"] = nuovo
+                            if _key(p.get("squadra_trasferta")) == kbase:
+                                _updd["squadra_trasferta"] = nuovo
+                            if _updd:
+                                try:
+                                    _clid.table("partite").update(_updd).eq(
+                                        "id", p.get("id")).execute()
+                                    _aggd += 1
+                                except Exception:
+                                    pass
+                    if _aggd or _regd:
+                        _invalida_partite()
+                        st.success(f"Rinominate {_aggd} partite e salvate {_regd} regole. "
+                                   "Le partite future di queste competizioni verranno taggate "
+                                   "in automatico.")
+                        st.rerun()
+                    else:
+                        st.info("Nessun tag inserito: compila la colonna «Tag».")
+
     # --- Partite da compilare ---
     if "da_compilare" in df.columns:
         dac = df[df["da_compilare"] == True]
@@ -3838,6 +3972,7 @@ def pagina_estrattore_risultati(user):
         nuove_partite = []
         if crea_mancanti and data_ris:
             _amb_r = carica_squadre_ambigue()
+            _mapdiv_r = carica_omonime_divisione()
             for idx, rrow in edit.iterrows():
                 m = meta[idx]
                 if m["id"]:
@@ -3852,6 +3987,9 @@ def pagina_estrattore_risultati(user):
                     _casa = _cr
                 if _okt is True:
                     _trasf = _tr
+                # omonime per divisione: tagga in base alla competizione (es. Ried -> Ried (Bundesliga))
+                _casa = applica_tag_divisione(_casa, m["competizione"], _mapdiv_r)
+                _trasf = applica_tag_divisione(_trasf, m["competizione"], _mapdiv_r)
                 nuove_partite.append({
                     "data": str(data_ris),
                     "squadra_casa": _casa,
@@ -4065,6 +4203,7 @@ def pagina_estrattore_pianificazione(user):
             ])
         records = []
         _amb = carica_squadre_ambigue()
+        _mapdiv = carica_omonime_divisione()
         for idx, rrow in edit.iterrows():
             if not rrow["Crea"] or not rrow["Casa"] or not rrow["Trasferta"]:
                 continue
@@ -4076,6 +4215,9 @@ def pagina_estrattore_pianificazione(user):
                 casa_r = _scelte_amb.get(rrow["Casa"], rrow["Casa"])
             if _ok_t == "scegli":
                 trasf_r = _scelte_amb.get(rrow["Trasferta"], rrow["Trasferta"])
+            # omonime per divisione: tagga in base alla competizione
+            casa_r = applica_tag_divisione(casa_r, _comp, _mapdiv)
+            trasf_r = applica_tag_divisione(trasf_r, _comp, _mapdiv)
             records.append({
                 "data": str(data_batch),
                 "ora": rrow["Ora"] or None,
@@ -7439,11 +7581,15 @@ def pagina_inserimento_storico(user):
             k = (str(r.get("data"))[:10], _key(r.get("squadra_casa")), _key(r.get("squadra_trasferta")))
             db_idx[k] = {"gc": r.get("gol_casa"), "gt": r.get("gol_trasferta"), "id": r.get("id")}
 
+    _mapdiv_s = carica_omonime_divisione()
+
     def _risolvi(nome, comp_lbl):
         # ok=True: risolta col paese (campionato nazionale). ok=False: non ambigua (invariata).
         # ok="scegli": coppa internazionale -> qui teniamo il nome semplice (storico = campionato).
         r, ok = risolvi_squadra_ambigua(nome, comp_lbl, comp_df, _amb)
-        return r if ok is True else nome
+        nm = r if ok is True else nome
+        # omonime per divisione: tagga in base alla competizione (es. Ried -> Ried (Bundesliga))
+        return applica_tag_divisione(nm, comp_lbl, _mapdiv_s)
 
     righe = []
     records = []              # da salvare (nuove + conflitti)
