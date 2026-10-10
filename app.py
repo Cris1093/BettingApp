@@ -809,9 +809,47 @@ def carica_omonime_divisione():
         nb = _txt(r.get("nome_base"))
         cp = _txt(r.get("competizione"))
         tg = _txt(r.get("nome_taggato"))
+        if cp == "*":
+            continue  # riga sentinella "stessa squadra" (gestita da carica_omdiv_ignora)
         if nb and cp and tg:
             out[(_key(nb), _key(cp))] = tg
     return out
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def carica_omdiv_ignora():
+    """Nomi marcati come 'stessa squadra' (NON omonime per divisione): il rilevatore li salta.
+    Memorizzati come riga sentinella con competizione='*'."""
+    cli = get_client()
+    if not cli:
+        return set()
+    try:
+        rows = cli.table("omonime_divisione").select("nome_base,competizione").execute().data or []
+    except Exception:
+        return set()
+    return {_key(_txt(r.get("nome_base"))) for r in rows if _txt(r.get("competizione")) == "*"}
+
+
+def salva_omdiv_ignora(nome_base):
+    """Marca un nome come 'stessa squadra' (non va separato): riga sentinella competizione='*'."""
+    cli = get_client()
+    if not cli:
+        return
+    try:
+        ex = (cli.table("omonime_divisione").select("id")
+              .ilike("nome_base", nome_base.strip()).eq("competizione", "*").execute())
+        if not ex.data:
+            cli.table("omonime_divisione").insert(
+                {"nome_base": nome_base.strip(), "competizione": "*",
+                 "nome_taggato": "__STESSA_SQUADRA__",
+                 "aggiornato_il": datetime.utcnow().isoformat()}).execute()
+    except Exception:
+        pass
+    for _f in (carica_omdiv_ignora, carica_omonime_divisione):
+        try:
+            _f.clear()
+        except Exception:
+            pass
 
 
 def salva_omonima_divisione(nome_base, competizione, nome_taggato):
@@ -1516,6 +1554,14 @@ def _rileva_omonime_divisione():
         meta = (_txt(c.get("nazione")), _txt(c.get("categoria")), _txt(c.get("nome_lungo")))
         for kk in _chiavi_competizione(c):
             info[kk] = meta
+    def _lega_base(nome_lungo, lbl):
+        # nome del campionato SENZA la fase: 'Liga Pro - Play-Offs Championship' -> 'Liga Pro',
+        # 'Serie B - Gruppo Promozione' -> 'Serie B'. Così le fasi diverse dello STESSO
+        # campionato non vengono contate come campionati distinti (niente falsi positivi).
+        nm = _txt(nome_lungo) or _txt(lbl).rsplit(" | ", 1)[0]
+        return _key(nm.split(" - ")[0].strip())
+
+    _ignora = carica_omdiv_ignora()
     per_sq = {}
     for _, p in df.iterrows():
         lbl = _txt(p.get("competizione"))
@@ -1524,15 +1570,18 @@ def _rileva_omonime_divisione():
             continue
         if not _e_lega_comp(cat, nl or lbl):
             continue  # conta solo i CAMPIONATI
+        base_lega = _lega_base(nl, lbl)
         for col in ("squadra_casa", "squadra_trasferta"):
             sq = _txt(p.get(col))
             if sq:
-                per_sq.setdefault(sq, {}).setdefault(naz, set()).add(lbl)
+                per_sq.setdefault(sq, {}).setdefault(naz, set()).add(base_lega)
     out = {}
     for sq, nazmap in per_sq.items():
-        for naz, comps in nazmap.items():
-            if len(comps) >= 2:
-                out.setdefault(sq, {})[naz] = comps
+        if _key(sq) in _ignora:
+            continue  # marcata "stessa squadra"
+        for naz, leghe in nazmap.items():
+            if len(leghe) >= 2:
+                out.setdefault(sq, {})[naz] = leghe
     return out
 
 
@@ -3424,9 +3473,22 @@ def pagina_database(user):
                                + "**. Se una squadra è stata promossa/retrocessa, riusa il suo "
                                "tag; se è una terza squadra diversa, scrivi un tag nuovo.")
                 st.caption(f"Il nome diventerà «{base} (tag)». Le competizioni lasciate senza "
-                           "tag restano col nome semplice.")
-                if st.button("✏️ Applica e salva regole", type="primary",
-                             key=f"omdiv_apply_{kbase}"):
+                           "tag restano col nome semplice. Se invece **è un'unica squadra** "
+                           "(stesso campionato in fasi diverse, non un'omonima), usa il pulsante "
+                           "«È la stessa squadra».")
+                _cbtn = st.columns([1, 1])
+                if _cbtn[1].button("✅ È la stessa squadra (non separare)",
+                                   key=f"omdiv_same_{kbase}"):
+                    salva_omdiv_ignora(base)
+                    try:
+                        _rileva_omonime_divisione.clear()
+                    except Exception:
+                        pass
+                    st.success(f"«{base}» segnata come squadra unica: non comparirà più tra le "
+                               "omonime da separare.")
+                    st.rerun()
+                if _cbtn[0].button("✏️ Applica e salva regole", type="primary",
+                                   key=f"omdiv_apply_{kbase}"):
                     _clid = get_client()
                     _aggd, _regd = 0, 0
                     for _, r in _ed_d.iterrows():
