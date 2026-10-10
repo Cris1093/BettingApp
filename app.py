@@ -831,10 +831,11 @@ def carica_omdiv_ignora():
 
 
 def salva_omdiv_ignora(nome_base):
-    """Marca un nome come 'stessa squadra' (non va separato): riga sentinella competizione='*'."""
+    """Marca un nome come 'stessa squadra' (non va separato): riga sentinella competizione='*'.
+    Ritorna (ok, messaggio). Se la tabella non esiste, lo segnala col comando da lanciare."""
     cli = get_client()
     if not cli:
-        return
+        return False, "Supabase non configurato."
     try:
         ex = (cli.table("omonime_divisione").select("id")
               .ilike("nome_base", nome_base.strip()).eq("competizione", "*").execute())
@@ -843,13 +844,21 @@ def salva_omdiv_ignora(nome_base):
                 {"nome_base": nome_base.strip(), "competizione": "*",
                  "nome_taggato": "__STESSA_SQUADRA__",
                  "aggiornato_il": datetime.utcnow().isoformat()}).execute()
-    except Exception:
-        pass
+    except Exception as e:
+        msg = str(e)
+        if "omonime_divisione" in msg.lower() or "relation" in msg.lower() or "does not exist" in msg.lower():
+            return False, ("La tabella 'omonime_divisione' non esiste su Supabase. Lancia nel "
+                           "SQL Editor:\n\ncreate table if not exists omonime_divisione (\n"
+                           "  id uuid primary key default gen_random_uuid(),\n"
+                           "  nome_base text, competizione text, nome_taggato text,\n"
+                           "  aggiornato_il timestamptz default now());")
+        return False, msg
     for _f in (carica_omdiv_ignora, carica_omonime_divisione):
         try:
             _f.clear()
         except Exception:
             pass
+    return True, None
 
 
 def salva_omonima_divisione(nome_base, competizione, nome_taggato):
@@ -3479,14 +3488,17 @@ def pagina_database(user):
                 _cbtn = st.columns([1, 1])
                 if _cbtn[1].button("✅ È la stessa squadra (non separare)",
                                    key=f"omdiv_same_{kbase}"):
-                    salva_omdiv_ignora(base)
-                    try:
-                        _rileva_omonime_divisione.clear()
-                    except Exception:
-                        pass
-                    st.success(f"«{base}» segnata come squadra unica: non comparirà più tra le "
-                               "omonime da separare.")
-                    st.rerun()
+                    _okd, _msgd = salva_omdiv_ignora(base)
+                    if _okd:
+                        try:
+                            _rileva_omonime_divisione.clear()
+                        except Exception:
+                            pass
+                        st.success(f"«{base}» segnata come squadra unica: non comparirà più tra "
+                                   "le omonime da separare.")
+                        st.rerun()
+                    else:
+                        st.error(f"Non salvato: {_msgd}")
                 if _cbtn[0].button("✏️ Applica e salva regole", type="primary",
                                    key=f"omdiv_apply_{kbase}"):
                     _clid = get_client()
