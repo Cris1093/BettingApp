@@ -447,6 +447,49 @@ def to_excel(dfs: dict) -> bytes:
     return buf.getvalue()
 
 
+def to_excel_per_squadra(df) -> bytes:
+    """Backup: un FOGLIO per ogni squadra (nome esatto come salvato), con le sue partite —
+    Data, Casa, Trasferta, Risultato (vuoto se in attesa), Competizione — dalla più recente."""
+    buf = io.BytesIO()
+    squadre = {}
+    for _, p in df.iterrows():
+        gc, gt = p.get("gol_casa"), p.get("gol_trasferta")
+        ris = (f"{int(gc)}-{int(gt)}" if (_num_ok(gc) and _num_ok(gt)) else "")
+        riga = {
+            "Data": str(p.get("data"))[:10],
+            "Casa": _txt(p.get("squadra_casa")),
+            "Trasferta": _txt(p.get("squadra_trasferta")),
+            "Risultato": ris,
+            "Competizione": _txt(p.get("competizione")),
+        }
+        for sq in (riga["Casa"], riga["Trasferta"]):
+            if sq:
+                squadre.setdefault(sq, []).append(riga)
+
+    def _foglio_sicuro(nome, usati):
+        # Excel: max 31 caratteri, niente \ / ? * [ ] :, nomi univoci
+        s = re.sub(r"[\\/?*\[\]:]", " ", nome).strip() or "Squadra"
+        s = s[:31]
+        base, i = s, 2
+        while s.lower() in usati:
+            suff = f" {i}"
+            s = base[:31 - len(suff)] + suff
+            i += 1
+        usati.add(s.lower())
+        return s
+
+    usati = set()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        if not squadre:
+            pd.DataFrame({"vuoto": []}).to_excel(w, sheet_name="vuoto", index=False)
+        for sq in sorted(squadre.keys(), key=lambda x: x.lower()):
+            righe = sorted(squadre[sq], key=lambda r: r["Data"], reverse=True)
+            pd.DataFrame(righe, columns=["Data", "Casa", "Trasferta", "Risultato",
+                                         "Competizione"]).to_excel(
+                w, sheet_name=_foglio_sicuro(sq, usati), index=False)
+    return buf.getvalue()
+
+
 # Colonne partite -> intestazioni leggibili (ordine incluso) per l'export Excel
 EXPORT_COLONNE = [
     ("data", "Data"), ("ora", "Ora"), ("competizione", "Competizione"),
@@ -3727,6 +3770,22 @@ def pagina_database(user):
         file_name="partite.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+    # --- backup: un foglio per ogni squadra ---
+    st.caption("🗂️ **Backup per squadra**: un foglio Excel per ogni squadra con le sue partite "
+               "(casa, trasferta, risultato). Può essere pesante se ci sono molte squadre, perciò "
+               "si genera su richiesta.")
+    if st.button("🗂️ Genera backup per squadra"):
+        with st.spinner("Creo il file (un foglio per squadra)…"):
+            st.session_state["_bkp_sq"] = to_excel_per_squadra(df)
+    if st.session_state.get("_bkp_sq"):
+        _dt_bkp = datetime.utcnow().strftime("%Y%m%d")
+        st.download_button(
+            "⬇️ Scarica backup per squadra (Excel)",
+            data=st.session_state["_bkp_sq"],
+            file_name=f"backup_squadre_{_dt_bkp}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
     # --- editor quote / valori rose di una partita ---
     st.divider()
