@@ -1483,6 +1483,59 @@ def _rileva_squadre_omonime():
     return {sq: nz for sq, nz in naz_per_squadra.items() if len(nz) > 1}
 
 
+def _e_lega_comp(categoria, nome_lungo):
+    """True se la competizione è un CAMPIONATO (non una coppa/playoff). Usa la categoria se
+    assegnata, altrimenti un'euristica sul nome (le coppe contengono parole-chiave)."""
+    cat = _txt(categoria)
+    if cat == "Campionato":
+        return True
+    if cat in ("Coppa nazionale", "Coppa internazionale", "Playoff"):
+        return False
+    low = _txt(nome_lungo).lower()
+    _cup = ("copp", "coppa", "cup", "copa", "coupe", "pokal", "beker", "kup", "taca", "taça",
+            "super", "trophy", "playoff", "play off", "play-off", "qualificazione")
+    return not any(w in low for w in _cup)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _rileva_omonime_divisione():
+    """Rileva le OMONIME PER DIVISIONE: nomi (esatti) che compaiono in 2+ CAMPIONATI della
+    STESSA nazione (due squadre diverse non possono stare in due campionati nazionali insieme).
+    Le coppe non contano come campionato, così non si creano falsi positivi. Ritorna
+    {nome: {nazione: set(etichette_campionato)}} solo per i nomi candidati."""
+    df = carica_partite()
+    comp_df = carica_competizioni()
+    if df.empty or comp_df.empty:
+        return {}
+    _non_paesi = {"europa", "asia", "africa", "sud america", "sudamerica", "nord america",
+                  "nord e centro america", "centro america", "oceania", "mondo",
+                  "australia e oceania", "internazionale", "world", "conmebol", "concacaf",
+                  "uefa", "afc", "caf", "fifa"}
+    info = {}
+    for _, c in comp_df.iterrows():
+        meta = (_txt(c.get("nazione")), _txt(c.get("categoria")), _txt(c.get("nome_lungo")))
+        for kk in _chiavi_competizione(c):
+            info[kk] = meta
+    per_sq = {}
+    for _, p in df.iterrows():
+        lbl = _txt(p.get("competizione"))
+        naz, cat, nl = info.get(_key(lbl), ("", "", lbl))
+        if not naz or _key(naz) in _non_paesi:
+            continue
+        if not _e_lega_comp(cat, nl or lbl):
+            continue  # conta solo i CAMPIONATI
+        for col in ("squadra_casa", "squadra_trasferta"):
+            sq = _txt(p.get(col))
+            if sq:
+                per_sq.setdefault(sq, {}).setdefault(naz, set()).add(lbl)
+    out = {}
+    for sq, nazmap in per_sq.items():
+        for naz, comps in nazmap.items():
+            if len(comps) >= 2:
+                out.setdefault(sq, {})[naz] = comps
+    return out
+
+
 def _nazione_di(codice_o_label, comp_df):
     """Data una competizione, restituisce la nazione dell'anagrafica (es. 'ITALIA'), o None.
     Serve a distinguere squadre omonime in base al paese del campionato che giocano."""
@@ -3295,40 +3348,83 @@ def pagina_database(user):
     # === OMONIME STESSO PAESE, DIVISIONI DIVERSE ===
     with st.expander("🏳️ Omonime stesso paese (divisioni diverse)"):
         st.caption("Due squadre con lo STESSO nome nella STESSA nazione ma in campionati diversi "
-                   "(es. «Ried» in Bundesliga e in Regionalliga North). Il tag nazione non basta "
-                   "a separarle: scegli la squadra, assegna un tag a ogni competizione e il "
-                   "sistema rinomina le partite e ricorda la regola per quelle future.")
-        _sqd = st.text_input("Nome squadra da separare (nome esatto)", key="omdiv_nome",
-                             placeholder="es. Ried")
-        if _sqd and _sqd.strip():
-            base = _sqd.strip()
+                   "(es. «Ried» in Bundesliga e in Regionalliga North). Il sistema le rileva da "
+                   "solo e pre-compila i campionati: a te restano da assegnare solo le coppe.")
+        comp_df_div = carica_competizioni()
+        _info_div = {}
+        for _, c in comp_df_div.iterrows():
+            for kk in _chiavi_competizione(c):
+                _info_div[kk] = (_txt(c.get("categoria")), _txt(c.get("nome_lungo")))
+
+        # rilevamento automatico (lazy)
+        if not st.session_state.get("_calc_omdiv"):
+            if st.button("🔍 Rileva omonime per divisione"):
+                st.session_state["_calc_omdiv"] = True
+                st.rerun()
+            _cand = None
+        else:
+            _cand = _rileva_omonime_divisione()
+
+        base = None
+        if _cand is not None:
+            if _cand:
+                st.warning(f"Trovati **{len(_cand)}** nomi che giocano in 2+ campionati della "
+                           "stessa nazione (possibili omonime da separare):")
+                _sel = st.selectbox("Squadra rilevata", ["(scegli)"] + sorted(_cand.keys()),
+                                    key="omdiv_sel")
+                if _sel and _sel != "(scegli)":
+                    base = _sel
+            else:
+                st.success("Nessuna omonima per divisione rilevata. 👍")
+        _man = st.text_input("…oppure cerca un nome a mano (nome esatto)",
+                             key="omdiv_nome", placeholder="es. Ried")
+        if _man and _man.strip():
+            base = _man.strip()
+
+        if base:
             kbase = _key(base)
             mine = df[(df["squadra_casa"].map(_key) == kbase) |
                       (df["squadra_trasferta"].map(_key) == kbase)]
             if mine.empty:
-                st.info(f"Nessuna partita trovata col nome esatto «{base}». "
-                        "Se è già stata taggata, cerca il nome base originale.")
+                st.info(f"Nessuna partita trovata col nome esatto «{base}».")
             else:
                 from collections import Counter as _Cdiv
                 _cc = _Cdiv(_txt(c) for c in mine["competizione"] if _txt(c))
                 _map_exist = carica_omonime_divisione()
+                # tag già usati per questo nome (per distinguere promozione/retrocessione da
+                # una terza squadra omonima)
+                _tag_usati = set()
+                for (kn, kc), v in _map_exist.items():
+                    if kn == kbase:
+                        _m2 = re.search(r"\(([^)]+)\)\s*$", v)
+                        if _m2:
+                            _tag_usati.add(_m2.group(1))
                 _rows_d = []
                 for comp, nconf in sorted(_cc.items(), key=lambda x: -x[1]):
-                    _tagpre = _map_exist.get((kbase, _key(comp)), "")
                     _suf = ""
-                    _mm = re.search(r"\(([^)]+)\)\s*$", _tagpre)
-                    if _mm:
-                        _suf = _mm.group(1)
+                    _saved = _map_exist.get((kbase, _key(comp)))
+                    if _saved:
+                        _mm = re.search(r"\(([^)]+)\)\s*$", _saved)
+                        _suf = _mm.group(1) if _mm else ""
+                    else:
+                        _cat, _nl = _info_div.get(_key(comp), ("", comp))
+                        if _e_lega_comp(_cat, _nl or comp):
+                            # CAMPIONATO: pre-compila il tag col nome del campionato
+                            _suf = comp.rsplit(" | ", 1)[0].strip()
+                        # COPPA: lascia vuoto (assegnazione manuale)
                     _rows_d.append({"Competizione": comp, "Partite": nconf, "Tag": _suf})
                 _ed_d = st.data_editor(
                     pd.DataFrame(_rows_d), use_container_width=True, hide_index=True,
                     key=f"omdiv_ed_{kbase}", disabled=["Competizione", "Partite"],
                     column_config={"Tag": st.column_config.TextColumn(
-                        "Tag", help="Es. Bundesliga, Regionalliga. Vuoto = lascia il nome "
-                                    "semplice. Stesso tag su più competizioni = stessa squadra "
-                                    "(metti il tag della coppa uguale a quello del campionato).")})
-                st.caption(f"Il nome diventerà «{base} (tag)». Le competizioni con lo STESSO tag "
-                           "finiscono sotto la stessa squadra.")
+                        "Tag", help="Campionati pre-compilati. Le coppe sono vuote: assegna il "
+                                    "tag della squadra giusta. Stesso tag = stessa squadra.")})
+                if _tag_usati:
+                    st.caption("Tag già usati per «" + base + "»: **" + "**, **".join(sorted(_tag_usati))
+                               + "**. Se una squadra è stata promossa/retrocessa, riusa il suo "
+                               "tag; se è una terza squadra diversa, scrivi un tag nuovo.")
+                st.caption(f"Il nome diventerà «{base} (tag)». Le competizioni lasciate senza "
+                           "tag restano col nome semplice.")
                 if st.button("✏️ Applica e salva regole", type="primary",
                              key=f"omdiv_apply_{kbase}"):
                     _clid = get_client()
@@ -3357,6 +3453,10 @@ def pagina_database(user):
                                     pass
                     if _aggd or _regd:
                         _invalida_partite()
+                        try:
+                            _rileva_omonime_divisione.clear()
+                        except Exception:
+                            pass
                         st.success(f"Rinominate {_aggd} partite e salvate {_regd} regole. "
                                    "Le partite future di queste competizioni verranno taggate "
                                    "in automatico.")
