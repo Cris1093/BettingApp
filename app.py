@@ -846,12 +846,16 @@ def salva_omdiv_ignora(nome_base):
                  "aggiornato_il": datetime.utcnow().isoformat()}).execute()
     except Exception as e:
         msg = str(e)
-        if "omonime_divisione" in msg.lower() or "relation" in msg.lower() or "does not exist" in msg.lower():
+        low = msg.lower()
+        if "does not exist" in low and "omonime_divisione" in low:
             return False, ("La tabella 'omonime_divisione' non esiste su Supabase. Lancia nel "
                            "SQL Editor:\n\ncreate table if not exists omonime_divisione (\n"
                            "  id uuid primary key default gen_random_uuid(),\n"
                            "  nome_base text, competizione text, nome_taggato text,\n"
                            "  aggiornato_il timestamptz default now());")
+        if "row-level security" in low or "row level security" in low or "rls" in low:
+            return False, ("La tabella esiste ma la RLS blocca le scritture. Lancia nel SQL "
+                           "Editor: alter table omonime_divisione disable row level security;")
         return False, msg
     for _f in (carica_omdiv_ignora, carica_omonime_divisione):
         try:
