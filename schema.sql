@@ -169,3 +169,27 @@ create table if not exists snapshot_prematch (
     n_home        int,               -- storico grezzo casa al momento dello snapshot
     n_away        int                -- storico grezzo ospite
 );
+
+-- Validazione manuale dello storico di una squadra (per nazione): traccia quali squadre
+-- hanno lo storico controllato/completo. È solo un'etichetta di fiducia + comodità di
+-- navigazione: NON blocca i motori (il gate resta 15 partite su entrambe le squadre).
+create table if not exists storico_validato (
+    id           uuid primary key default gen_random_uuid(),
+    squadra      text,              -- nome della squadra (con eventuale tag nazione)
+    nazione      text,              -- es. 'ITALIA'
+    n_partite    int,               -- quante partite risultavano a DB al momento della validazione
+    validato_da  text,
+    aggiornato_il timestamptz default now()
+);
+
+-- Omonime per DIVISIONE: due squadre con lo STESSO nome nella STESSA nazione ma in campionati
+-- diversi (es. 'Ried' in Bundesliga AUSTRIA e in Regionalliga North AUSTRIA). Si distinguono
+-- solo dalla competizione: mappa (nome_base + competizione) -> nome_taggato. Usata per
+-- rinominare retroattivamente e per taggare in automatico le partite future.
+create table if not exists omonime_divisione (
+    id           uuid primary key default gen_random_uuid(),
+    nome_base    text,              -- es. 'Ried'
+    competizione text,              -- etichetta come salvata nelle partite, es. 'Bundesliga | AUSTRIA'
+    nome_taggato text,              -- es. 'Ried (Bundesliga)'
+    aggiornato_il timestamptz default now()
+);
