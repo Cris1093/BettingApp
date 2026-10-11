@@ -1915,6 +1915,20 @@ def parse_risultati(testo, raccogli_posticipate=False):
         if is_int(righe[i]):
             i += 1
             continue
+
+        # NAZIONE ORFANA: una riga tutta MAIUSCOLA (es. 'GRECIA') lasciata sola — capita quando
+        # si incolla a partire da metà programma — seguita da qualcosa che NON è una nazione.
+        # Va SALTATA da sola, altrimenti sfasa di uno l'accoppiamento nome+nazione di tutte le
+        # intestazioni successive (es. 'GUATEMALA' usata come nome e 'Aurora F.C.' come nazione).
+        def _e_naz(x):
+            s = _txt(x)
+            return (len(s) >= 3 and s == s.upper() and any(c.isalpha() for c in s)
+                    and not s[0].isdigit())
+
+        if _e_naz(righe[i]) and (i + 1 >= n or not _e_naz(righe[i + 1])):
+            i += 1
+            continue
+
         # intestazione competizione: nome + nazione
         comp_corr = righe[i]
         naz_corr = righe[i + 1] if i + 1 < n else None
