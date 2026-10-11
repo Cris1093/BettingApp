@@ -1591,6 +1591,21 @@ def _e_lega_comp(categoria, nome_lungo):
     return not any(w in low for w in _cup)
 
 
+def _e_comp_nazionali(nome_lungo):
+    """True se la competizione è per NAZIONALI (non per club): Nations League, amichevoli
+    nazionali, Europei/Mondiali, Coppa d'Africa/Asia/America, ecc. Serve a riconoscere le
+    omonimie 'club vs nazionale' (es. 'Andorra' club spagnolo in LaLiga2 e nazionale in
+    Nations League). Esclude esplicitamente le competizioni per CLUB (che contengono 'club')."""
+    low = _txt(nome_lungo).lower()
+    if not low or "club" in low:
+        return False
+    markers = ("nations league", "amichevoli nazionali", "amichevoli internazionali",
+               "europei", "mondiali", "coppa d'africa", "africa cup", "african nations",
+               "copa america", "coppa america", "gold cup", "asian cup", "coppa d'asia",
+               "coppa delle nazioni", "nations cup", "confederations", "giochi olimpici")
+    return any(m in low for m in markers)
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def _rileva_omonime_divisione():
     """Rileva le OMONIME PER DIVISIONE: nomi (esatti) che compaiono in 2+ CAMPIONATI della
@@ -1618,10 +1633,19 @@ def _rileva_omonime_divisione():
         return _key(nm.split(" - ")[0].strip())
 
     _ignora = carica_omdiv_ignora()
-    per_sq = {}
+    per_sq = {}          # nome -> {nazione -> set(campionato_base)}
+    gioca_nazionali = set()   # key(nome) che giocano anche in competizioni da NAZIONALE
     for _, p in df.iterrows():
         lbl = _txt(p.get("competizione"))
         naz, cat, nl = info.get(_key(lbl), ("", "", lbl))
+        # competizione per NAZIONALI (Nations League, amichevoli nazionali, Europei…):
+        # segnala che quel nome gioca anche come nazionale (per il caso club vs nazionale)
+        if _e_comp_nazionali(nl or lbl):
+            for col in ("squadra_casa", "squadra_trasferta"):
+                sq = _txt(p.get(col))
+                if sq:
+                    gioca_nazionali.add(_key(sq))
+            continue
         if not naz or _key(naz) in _non_paesi:
             continue
         if not _e_lega_comp(cat, nl or lbl):
@@ -1635,9 +1659,12 @@ def _rileva_omonime_divisione():
     for sq, nazmap in per_sq.items():
         if _key(sq) in _ignora:
             continue  # marcata "stessa squadra"
-        for naz, leghe in nazmap.items():
-            if len(leghe) >= 2:
-                out.setdefault(sq, {})[naz] = leghe
+        # candidato se: (a) 2+ campionati nella stessa nazione (due club diversi) OPPURE
+        # (b) gioca in un campionato di club E anche come nazionale (club vs nazionale)
+        _due_campionati = any(len(l) >= 2 for l in nazmap.values())
+        _club_e_nazionale = _key(sq) in gioca_nazionali
+        if _due_campionati or _club_e_nazionale:
+            out[sq] = {naz: leghe for naz, leghe in nazmap.items()}
     return out
 
 
@@ -3527,7 +3554,11 @@ def pagina_database(user):
                         _suf = _mm.group(1) if _mm else ""
                     else:
                         _cat, _nl = _info_div.get(_key(comp), ("", comp))
-                        if _e_lega_comp(_cat, _nl or comp):
+                        if _e_comp_nazionali(_nl or comp):
+                            # competizione da NAZIONALE (Nations League, amichevoli naz.…):
+                            # pre-compila col tag 'Nazionale' (caso club vs nazionale)
+                            _suf = "Nazionale"
+                        elif _e_lega_comp(_cat, _nl or comp):
                             # CAMPIONATO: pre-compila il tag col nome del campionato
                             _suf = comp.rsplit(" | ", 1)[0].strip()
                         # COPPA: lascia vuoto (assegnazione manuale)
