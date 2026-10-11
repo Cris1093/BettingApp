@@ -2232,6 +2232,112 @@ def parse_storico(testo, oggi=None):
     return {"partite": out, "soggetto": soggetto, "errori": errori}
 
 
+def parse_check(testo):
+    """Parser del formato 'ULTIMI INCONTRI' (uno o due blocchi-squadra), per il Check partite.
+    Struttura per blocco:
+        ULTIMI INCONTRI: CAGLIARI
+        19.09.26            (data gg.mm.aa)
+        SA                  (codice competizione, es. SA/COP/CF/EL)
+        Udinese
+        Udinese
+        Cagliari
+        Cagliari
+        0
+        1
+        V                   (esito, facoltativo)
+    Può esserci un qualificatore prima del codice (es. 'Dopo Rigori') e punteggi coi rigori
+    tipo '0(4)'. 'Mostra più incontri' viene ignorato.
+    Ritorna: [{'squadra': str, 'partite': [ {data(ISO), code, casa, trasferta, gol_casa,
+    gol_trasferta, lettera, qualif} ]}]."""
+    import datetime as _dt
+    righe = [r.strip() for r in testo.splitlines()]
+    righe = [r for r in righe if r]
+    n = len(righe)
+    _re_data = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$")
+    _qualif = {"dopo rigori", "dopo suppl.", "dopo supplementari", "rigori", "d.c.r.", "dcr",
+               "d.t.s.", "dts", "dopo i rigori"}
+    _ignora = {"mostra più incontri", "mostra piu incontri"}
+
+    def _is_ris(x):
+        return re.fullmatch(r"\d+(\s*\(\d+\))?", x.strip()) is not None   # '0' oppure '0(4)'
+
+    def _goals(x):
+        return int(re.sub(r"\(.*?\)", "", x).strip())
+
+    def _dedup(seq):
+        res = []
+        for x in seq:
+            if not res or res[-1] != x:
+                res.append(x)
+        return res
+
+    blocchi = []
+    cur = None
+    i = 0
+    while i < n:
+        low = righe[i].lower()
+        if low.startswith("ultimi incontri"):
+            sq = righe[i].split(":", 1)[1].strip() if ":" in righe[i] else ""
+            cur = {"squadra": sq, "partite": []}
+            blocchi.append(cur)
+            i += 1
+            continue
+        if low in _ignora:
+            i += 1
+            continue
+        m = _re_data.match(righe[i])
+        if not m or cur is None:
+            i += 1
+            continue
+        gg, mm, aa = m.group(1), m.group(2), m.group(3)
+        j = i + 1
+        chunk = []
+        while j < n:
+            lj = righe[j].lower()
+            if _re_data.match(righe[j]) or lj.startswith("ultimi incontri") or lj in _ignora:
+                break
+            chunk.append(righe[j])
+            j += 1
+        idx = 0
+        qualif = None
+        if chunk and chunk[0].strip().lower() in _qualif:
+            qualif = chunk[0].strip()
+            idx = 1
+        # codice competizione = prima riga dopo il qualificatore, A MENO che sia una squadra
+        # (riconoscibile perché la riga dopo è identica: home,home)
+        if idx + 1 < len(chunk) and chunk[idx] == chunk[idx + 1]:
+            code = ""
+            rest = chunk[idx:]
+        else:
+            code = chunk[idx].strip() if idx < len(chunk) else ""
+            rest = chunk[idx + 1:]
+        lettera = ""
+        while rest and rest[-1].strip().upper() in ("V", "N", "P"):
+            lettera = rest[-1].strip().upper()
+            rest = rest[:-1]
+        pos = [k for k, v in enumerate(rest) if _is_ris(v)]
+        if len(pos) < 2:
+            i = j
+            continue
+        gc, gt = _goals(rest[pos[-2]]), _goals(rest[pos[-1]])
+        nomi = _dedup([v for v in rest if not _is_ris(v)])
+        if len(nomi) < 2:
+            i = j
+            continue
+        casa, trasf = nomi[0], nomi[1]
+        anno = int(aa)
+        anno = anno + 2000 if anno < 100 else anno
+        try:
+            data = _dt.date(anno, int(mm), int(gg)).isoformat()
+        except ValueError:
+            data = None
+        cur["partite"].append({"data": data, "code": code, "casa": casa, "trasferta": trasf,
+                               "gol_casa": gc, "gol_trasferta": gt, "lettera": lettera,
+                               "qualif": qualif})
+        i = j
+    return blocchi
+
+
 def _similarita(a, b):
     return SequenceMatcher(None, _key(a), _key(b)).ratio()
 
@@ -8023,6 +8129,184 @@ def pagina_inserimento_storico(user):
         st.dataframe(pd.DataFrame(riep), use_container_width=True, hide_index=True)
 
 
+def pagina_check_partite(user):
+    st.header("✔️ Check partite")
+    st.caption("Incolla gli ULTIMI INCONTRI di una o due squadre (formato con codice "
+               "competizione per riga): il sistema confronta col database e segnala le partite "
+               "corrette, quelle in conflitto, quelle MANCANTI (da aggiungere) e quelle di "
+               "TROPPO (da cancellare).")
+    txt = st.text_area("Incolla qui gli ultimi incontri", key="chk_txt", height=260)
+    c1, c2 = st.columns([1, 1])
+    if c1.button("🔎 Controlla", type="primary"):
+        st.session_state["_chk_go"] = True
+    if c2.button("🧹 Pulisci"):
+        st.session_state.pop("_chk_go", None)
+        st.session_state["chk_txt"] = ""
+        st.rerun()
+    if not st.session_state.get("_chk_go") or not txt.strip():
+        if not txt.strip():
+            st.info("Incolla gli ultimi incontri e premi «Controlla».")
+        return
+
+    blocchi = parse_check(txt)
+    blocchi = [b for b in blocchi if b.get("squadra") and b.get("partite")]
+    if not blocchi:
+        st.warning("Non ho riconosciuto blocchi «ULTIMI INCONTRI: …». Controlla il formato.")
+        return
+
+    comp_df = carica_competizioni()
+    df = carica_partite()
+    _amb = carica_squadre_ambigue()
+    _mapdiv = carica_omonime_divisione()
+
+    # mappa codice competizione (nome_corto) -> etichetta completa
+    _code2lbl = {}
+    if not comp_df.empty:
+        for _, c in comp_df.iterrows():
+            nc = _key(_txt(c.get("nome_corto")))
+            if nc:
+                _code2lbl[nc] = label_competizione(c.get("nome_lungo"), c.get("nazione"))
+
+    def _comp_da_code(code):
+        return _code2lbl.get(_key(code), code or "")
+
+    for blk in blocchi:
+        sq = blk["squadra"]
+        ksub = _key(_norm_squadra(sq))
+        st.divider()
+        st.markdown(f"### {sq}")
+        part = blk["partite"]
+        valid = [p for p in part if p.get("data")]
+        # partite del soggetto a DB
+        if not df.empty:
+            _mine = df[(df["squadra_casa"].map(lambda x: _key(_norm_squadra(x))) == ksub) |
+                       (df["squadra_trasferta"].map(lambda x: _key(_norm_squadra(x))) == ksub)]
+        else:
+            _mine = df
+        # indice DB per confronto: (data, kcasa, ktrasf) -> riga
+        db_idx = {}
+        if not _mine.empty:
+            for _, r in _mine.iterrows():
+                k = (str(r.get("data"))[:10],
+                     _key(_norm_squadra(r.get("squadra_casa"))),
+                     _key(_norm_squadra(r.get("squadra_trasferta"))))
+                db_idx[k] = r
+
+        righe, mancanti, parsed_keys = [], [], set()
+        for p in valid:
+            kc, kt = _key(_norm_squadra(p["casa"])), _key(_norm_squadra(p["trasferta"]))
+            key = (p["data"], kc, kt)
+            parsed_keys.add(key)
+            r = db_idx.get(key)
+            ris_p = f'{p["gol_casa"]}-{p["gol_trasferta"]}'
+            if r is None:
+                stato = "🆕 mancante"
+                mancanti.append(p)
+            else:
+                gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
+                if _num_ok(gc) and _num_ok(gt) and int(gc) == p["gol_casa"] and int(gt) == p["gol_trasferta"]:
+                    stato = "✅ corretta"
+                else:
+                    _dbr = (f'{int(gc)}-{int(gt)}' if (_num_ok(gc) and _num_ok(gt)) else "in attesa")
+                    stato = f"⚠️ conflitto (DB {_dbr})"
+                    mancanti.append(p)  # da correggere (upsert aggiorna il risultato)
+            righe.append({
+                "Data": p["data"], "Casa": p["casa"], "Trasferta": p["trasferta"],
+                "Risultato": ris_p, "Competizione": _comp_da_code(p["code"]),
+                "Stato": stato,
+            })
+        st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
+        _ok = sum(1 for x in righe if x["Stato"].startswith("✅"))
+        st.caption(f"✅ {_ok} corrette · 🆕 {sum(1 for x in righe if x['Stato'].startswith('🆕'))} "
+                   f"mancanti · ⚠️ {sum(1 for x in righe if x['Stato'].startswith('⚠️'))} in conflitto.")
+
+        # --- MANCANTI / CONFLITTI: pulsante Aggiungi ---
+        if mancanti:
+            st.markdown("**Da aggiungere / correggere**")
+            _vm = pd.DataFrame([{
+                "Aggiungi": True, "Data": p["data"], "Casa": p["casa"],
+                "Trasferta": p["trasferta"],
+                "Risultato": f'{p["gol_casa"]}-{p["gol_trasferta"]}',
+                "Competizione": _comp_da_code(p["code"]),
+            } for p in mancanti])
+            _em = st.data_editor(_vm, use_container_width=True, hide_index=True,
+                                 key=f"chk_add_{ksub}",
+                                 disabled=["Data", "Casa", "Trasferta", "Risultato", "Competizione"],
+                                 column_config={"Aggiungi": st.column_config.CheckboxColumn("Aggiungi")})
+            if st.button(f"➕ Aggiungi/correggi le selezionate — {sq}", key=f"chk_addbtn_{ksub}"):
+                recs = []
+                for i2, p in enumerate(mancanti):
+                    if not _em.iloc[i2]["Aggiungi"]:
+                        continue
+                    comp = _comp_da_code(p["code"])
+                    _ca, _okc = risolvi_squadra_ambigua(p["casa"], comp, comp_df, _amb)
+                    _tr, _okt = risolvi_squadra_ambigua(p["trasferta"], comp, comp_df, _amb)
+                    casa = _ca if _okc is True else p["casa"]
+                    trasf = _tr if _okt is True else p["trasferta"]
+                    casa = applica_tag_divisione(casa, comp, _mapdiv)
+                    trasf = applica_tag_divisione(trasf, comp, _mapdiv)
+                    recs.append({
+                        "data": p["data"], "squadra_casa": casa, "squadra_trasferta": trasf,
+                        "gol_casa": p["gol_casa"], "gol_trasferta": p["gol_trasferta"],
+                        "competizione": comp, "qualificatore": p.get("qualif"),
+                        "da_compilare": False, "is_target": False,
+                        "inserito_da": user["username"],
+                        "aggiornato_il": datetime.utcnow().isoformat(),
+                    })
+                if recs:
+                    try:
+                        salva_partite(recs, preserva_competizione=True)
+                        _sync = completa_risultati_pronostici()
+                        _invalida_pronostici()
+                        st.success(f"Aggiunte/corrette {len(recs)} partite."
+                                   + (f" Aggiornati {_sync} pronostici." if _sync else ""))
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Errore: {e}")
+                else:
+                    st.info("Nessuna riga selezionata.")
+
+        # --- DI TROPPO: a DB ma non nell'incollato (nella finestra di date) ---
+        orfane = []
+        if valid and not _mine.empty:
+            dmin = min(p["data"] for p in valid)
+            dmax = max(p["data"] for p in valid)
+            for _, r in _mine.iterrows():
+                d10 = str(r.get("data"))[:10]
+                if not (dmin <= d10 <= dmax):
+                    continue
+                k = (d10, _key(_norm_squadra(r.get("squadra_casa"))),
+                     _key(_norm_squadra(r.get("squadra_trasferta"))))
+                if k in parsed_keys:
+                    continue
+                gc, gt = r.get("gol_casa"), r.get("gol_trasferta")
+                orfane.append({
+                    "id": r.get("id"), "Data": d10,
+                    "Casa": r.get("squadra_casa"), "Trasferta": r.get("squadra_trasferta"),
+                    "Risultato": (f"{int(gc)}-{int(gt)}" if (_num_ok(gc) and _num_ok(gt)) else "in attesa"),
+                    "Competizione": _label_da_comp(r.get("competizione"), comp_df) or "—",
+                    "Cancella": False,
+                })
+        if orfane:
+            st.markdown("**Di troppo (a DB ma non nell'incollato, nella finestra di date)**")
+            _vo = pd.DataFrame(orfane)
+            _eo = st.data_editor(_vo, use_container_width=True, hide_index=True,
+                                 key=f"chk_del_{ksub}",
+                                 disabled=["id", "Data", "Casa", "Trasferta", "Risultato", "Competizione"],
+                                 column_config={"id": None,
+                                                "Cancella": st.column_config.CheckboxColumn("Cancella")})
+            _ids = [r["id"] for _, r in _eo.iterrows() if r["Cancella"]]
+            if _ids and st.button(f"🗑️ Cancella le selezionate — {sq}", key=f"chk_delbtn_{ksub}"):
+                try:
+                    elimina_partite(_ids)
+                    st.success(f"Cancellate {len(_ids)} partite.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Errore: {e}")
+        elif valid:
+            st.caption("✅ Nessuna partita di troppo nella finestra di date.")
+
+
 def main():
     user = login_gate()
 
@@ -8030,7 +8314,7 @@ def main():
         st.markdown(f"**Utente:** {user['username']}  \n_ruolo: {user['ruolo']}_")
         _voci = ["📥 Ultimi risultati e quote", "📊 Estrattore risultati",
                  "🗓️ Estrattore pianificazione", "📚 Inserimento storico",
-                 "🎛️ Console partite", "🔮 Analisi & Pronostico",
+                 "✔️ Check partite", "🎛️ Console partite", "🔮 Analisi & Pronostico",
                  "📈 Storico pronostici", "🧪 Backtest",
                  "🗄️ Database", "⚙️ Configurazione", "🔧 Diagnostica"]
         # navigazione forzata dalla Console ("→ Pronostico"): porta all'Analisi
@@ -8046,6 +8330,7 @@ def main():
         "📊": ("Estrattore risultati", pagina_estrattore_risultati),
         "🗓️": ("Estrattore pianificazione", pagina_estrattore_pianificazione),
         "📚": ("Inserimento storico", pagina_inserimento_storico),
+        "✔️": ("Check partite", pagina_check_partite),
         "🎛️": ("Console partite", pagina_console_partite),
         "🔮": ("Analisi & Pronostico", pagina_analisi),
         "📈": ("Storico pronostici", pagina_storico_pronostici),
