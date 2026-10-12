@@ -692,7 +692,9 @@ def aggiorna_partite(records):
         payload = {k: v for k, v in rec.items() if k != "id"}
         if payload:
             cli.table("partite").update(payload).eq("id", rid).execute()
-    st.cache_data.clear()
+    # invalidazione MIRATA (solo partite): prima svuotava TUTTA la cache, forzando il
+    # ricaricamento delle ~7646 righe + competizioni/pronostici a ogni salvataggio risultati.
+    _invalida_partite()
 
 
 def elimina_partite(ids):
@@ -1033,7 +1035,12 @@ def upsert_competizioni(records):
             _id = idx_corto.get(_key(_txt(rec.get("nome_corto"))))
         rec["id"] = _id or str(uuid.uuid4())
     cli.table("competizioni").upsert(records).execute()
-    st.cache_data.clear()
+    # invalidazione MIRATA: solo le cache legate alle competizioni, NON le ~7646 partite
+    for _f in (carica_competizioni, _mappa_label_competizioni, _mappa_comp_per_id):
+        try:
+            _f.clear()
+        except Exception:
+            st.cache_data.clear()
 
 
 def elimina_competizione(cid):
@@ -4195,36 +4202,44 @@ def pagina_estrattore_risultati(user):
         canc_post = st.checkbox("🗑️ Cancella dallo storico queste partite posticipate",
                                 value=True, key="er_canc_post")
 
+    # === INDICI per l'abbinamento, costruiti UNA volta (prima erano O(risultati×partite)) ===
+    # exact[(kc,kt)] -> {'pending':[id...], 'any':[id...]}  ·  pend_list -> [(id,kc,kt)] in attesa
+    from collections import defaultdict as _dd_idx
+    exact_idx = _dd_idx(lambda: {"pending": [], "any": []})
+    pend_list = []
+    if not part.empty:
+        for _id, _kc, _kt, _gc in zip(part["id"], part["_c"], part["_t"], part["gol_casa"]):
+            e = exact_idx[(_kc, _kt)]
+            e["any"].append(_id)
+            if pd.isna(_gc):
+                e["pending"].append(_id)
+                pend_list.append((_id, _kc, _kt))
+    # categoria per competizione calcolata una sola volta per etichetta
+    _cat_cache = {}
+
+    def _cat_of(comp):
+        if comp not in _cat_cache:
+            _cat_cache[comp] = categoria_di(comp, comp_df)
+        return _cat_cache[comp]
+
     righe, meta = [], []
     for r in risultati:
         nc, nt = _key(_norm_squadra(r["casa"])), _key(_norm_squadra(r["trasferta"]))
-        cand = part[(part["_c"] == nc) & (part["_t"] == nt)] if not part.empty else part
-        pending = cand[cand["gol_casa"].isna()] if not cand.empty else cand
-
-        # FALLBACK flessibile: se il match esatto fallisce, prova per parole in comune
-        # ("Breda" ~ "NAC Breda", "Verona" ~ "Hellas Verona", "Waalwijk" ~ "RKC Waalwijk")
-        if (cand.empty or pending.empty) and not part.empty:
-            cand2 = part[part.apply(
-                lambda p: _nomi_compatibili(nc, p["_c"]) and _nomi_compatibili(nt, p["_t"]),
-                axis=1)]
-            pend2 = cand2[cand2["gol_casa"].isna()] if not cand2.empty else cand2
-            if not pend2.empty:
-                cand, pending = cand2, pend2
-            elif not cand2.empty and cand.empty:
-                cand = cand2
-
-        mid, applica = None, False
-        if not cand.empty and not pending.empty:
-            mid = pending.iloc[0]["id"]
-            stato = "✅ da compilare"
-            applica = True
-        elif not cand.empty:
-            mid = cand.iloc[0]["id"]
-            stato = "⚠️ già con risultato"
+        mid, applica, stato = None, False, "❌ non trovata"
+        e = exact_idx.get((nc, nt))
+        if e and e["pending"]:
+            mid, stato, applica = e["pending"][0], "✅ da compilare", True
+        elif e and e["any"]:
+            mid, stato = e["any"][0], "⚠️ già con risultato"
         else:
-            stato = "❌ non trovata"
+            # FALLBACK flessibile SOLO sulle fixture in attesa (poche): nomi compatibili
+            # ("Breda" ~ "NAC Breda", "Verona" ~ "Hellas Verona"). Niente più apply su tutto.
+            for _id, _kc, _kt in pend_list:
+                if _nomi_compatibili(nc, _kc) and _nomi_compatibili(nt, _kt):
+                    mid, stato, applica = _id, "✅ da compilare", True
+                    break
 
-        cat = categoria_di(r["competizione"], comp_df)
+        cat = _cat_of(r["competizione"])
         righe.append({
             "Applica": applica,
             "Competizione": r["competizione"] or "—",
