@@ -5071,10 +5071,11 @@ def _snapshot_prematch_una(df, comp_df, riga):
     t_key = _key(riga.get("competizione")) if riga.get("competizione") else None
     ph = _partite_squadra_evidenze(df, home, data_p, pid, comp_df, t_liv, t_cat, t_key)
     pa = _partite_squadra_evidenze(df, away, data_p, pid, comp_df, t_liv, t_cat, t_key)
-    # soglia allineata al motore: uno snapshot ML si crea SOLO se ENTRAMBE le squadre hanno
-    # almeno 15 partite precedenti. Evita di inquinare il dataset con avversari dallo storico
-    # incompleto (es. una squadra che compare solo perché citata nello storico di un'altra).
-    if len(ph) < 15 or len(pa) < 15:
+    # soglia allineata al motore: uno snapshot ML si crea SOLO se la finestra è valida (ultime 12
+    # partite per squadra, con >= 6 in casa per la squadra di casa e >= 6 in trasferta per l'ospite).
+    # Evita di inquinare il dataset con avversari dallo storico incompleto (es. una squadra che
+    # compare solo perché citata nello storico di un'altra).
+    if not _finestra_sufficiente(ph, pa):
         return None
     hcap_h = _handicap_livello(ph, t_liv)
     hcap_a = _handicap_livello(pa, t_liv)
@@ -6180,6 +6181,31 @@ def costruisci_indice_squadre(df):
     return idx
 
 
+# --- Finestra dati del motore -------------------------------------------------
+# Si considerano le ULTIME 12 partite di ciascuna squadra (in generale, casa+trasferta).
+# La finestra è però "valida" per generare un pronostico/snapshot SOLO se, tra queste 12,
+# la squadra di CASA ne ha almeno 6 giocate in casa e la squadra OSPITE almeno 6 in trasferta.
+FINESTRA_PARTITE = 12      # quante partite recenti considera il motore
+MIN_CASA_TRASFERTA = 6     # tra le 12: min. in casa (sq. casa) / in trasferta (sq. ospite)
+
+
+def _conta_casa(partite):
+    return sum(1 for p in partite if p.get("casa") is True)
+
+
+def _conta_trasferta(partite):
+    return sum(1 for p in partite if p.get("casa") is False)
+
+
+def _finestra_sufficiente(ph, pa):
+    """True se la finestra dati soddisfa la regola del motore: entrambe le squadre hanno
+    almeno FINESTRA_PARTITE partite recenti e, tra queste, la squadra di casa ne ha almeno
+    MIN_CASA_TRASFERTA giocate in casa e la squadra ospite almeno MIN_CASA_TRASFERTA in trasferta."""
+    return (len(ph) >= FINESTRA_PARTITE and len(pa) >= FINESTRA_PARTITE
+            and _conta_casa(ph) >= MIN_CASA_TRASFERTA
+            and _conta_trasferta(pa) >= MIN_CASA_TRASFERTA)
+
+
 def _partite_squadra_evidenze(df, team, prima_di=None, escludi_id=None,
                               comp_df=None, target_livello=None, target_categoria=None,
                               target_comp_key=None, recency_decay=None, indice=None):
@@ -6222,9 +6248,9 @@ def _partite_squadra_evidenze(df, team, prima_di=None, escludi_id=None,
         else:
             rec.update({"gf": int(m["gol_trasferta"]), "gs": int(m["gol_casa"]), "casa": False})
         out.append(rec)
-        # considera SOLO le ultime 15 partite (le più recenti): 'partite' è già ordinato
-        # dalla più recente, quindi mi fermo appena raggiungo 15
-        if len(out) >= 15:
+        # considera SOLO le ultime FINESTRA_PARTITE partite (le più recenti): 'partite' è già
+        # ordinato dalla più recente, quindi mi fermo appena raggiungo la finestra
+        if len(out) >= FINESTRA_PARTITE:
             break
     return out
 
@@ -6270,12 +6296,14 @@ def analisi_ragionata(df, home, away, data_partita=None, odds=None, variazioni=N
     t_key = _key(competizione) if competizione else None
     ph = _partite_squadra_evidenze(df, home, data_partita, escludi_id, comp_df, t_liv, t_cat, t_key, recency_decay, indice)
     pa = _partite_squadra_evidenze(df, away, data_partita, escludi_id, comp_df, t_liv, t_cat, t_key, recency_decay, indice)
-    # servono almeno 15 partite di storico per squadra: sotto questa soglia il pronostico
-    # non è affidabile e non viene generato
-    MIN_STORICO = 15
-    if len(ph) < MIN_STORICO or len(pa) < MIN_STORICO:
+    # Regola finestra: ultime 12 partite per squadra, valide solo se tra queste la squadra di
+    # casa ne ha >= 6 giocate in casa e la squadra ospite >= 6 in trasferta. Sotto questa soglia
+    # il pronostico non è affidabile e non viene generato.
+    if not _finestra_sufficiente(ph, pa):
         return {"_storico_insufficiente": True, "n_home": len(ph), "n_away": len(pa),
-                "min_richiesto": MIN_STORICO, "home": home, "away": away}
+                "n_casa_home": _conta_casa(ph), "n_trasf_away": _conta_trasferta(pa),
+                "min_richiesto": FINESTRA_PARTITE, "min_casa_trasf": MIN_CASA_TRASFERTA,
+                "home": home, "away": away}
     hcap_h = _handicap_livello(ph, t_liv)
     hcap_a = _handicap_livello(pa, t_liv)
     ev = evidenze.costruisci_evidenze(ph, pa, odds=odds, variazioni=variazioni,
@@ -6308,10 +6336,15 @@ def render_racconto_st(racc):
                    "Configurazione se vuoi includerlo.")
         return
     if racc and (racc.get("_storico_insufficiente") or racc.get("_inaffidabile")):
-        st.warning(f"⛔ Storico insufficiente per generare il pronostico. Servono almeno "
-                   f"**{racc.get('min_richiesto', 15)} partite** per squadra: "
-                   f"{racc.get('home','casa')} ne ha **{racc.get('n_home', 0)}**, "
-                   f"{racc.get('away','ospite')} ne ha **{racc.get('n_away', 0)}**. "
+        st.warning(f"⛔ Storico insufficiente per generare il pronostico. Servono le ultime "
+                   f"**{racc.get('min_richiesto', FINESTRA_PARTITE)} partite** per squadra e, "
+                   f"tra queste, almeno **{racc.get('min_casa_trasf', MIN_CASA_TRASFERTA)} in casa** "
+                   f"per la squadra di casa e **{racc.get('min_casa_trasf', MIN_CASA_TRASFERTA)} in "
+                   f"trasferta** per l'ospite. "
+                   f"{racc.get('home','casa')}: **{racc.get('n_home', 0)}** partite "
+                   f"(di cui {racc.get('n_casa_home', 0)} in casa); "
+                   f"{racc.get('away','ospite')}: **{racc.get('n_away', 0)}** partite "
+                   f"(di cui {racc.get('n_trasf_away', 0)} in trasferta). "
                    "Inserisci più partite di storico da «Ultimi risultati e quote».")
         return
     if not racc:
@@ -6335,8 +6368,8 @@ def render_racconto_st(racc):
                 st.markdown(f"- {r}")
 
 
-def _ultime_partite_testo(df, team, n=15, escludi_id=None):
-    """Righe di testo con le ultime partite giocate di una squadra."""
+def _ultime_partite_testo(df, team, n=FINESTRA_PARTITE, escludi_id=None):
+    """Righe di testo con le ultime partite giocate di una squadra (stessa finestra del motore)."""
     if df.empty:
         return []
     d = df[((df["squadra_casa"] == team) | (df["squadra_trasferta"] == team))]
@@ -6837,7 +6870,7 @@ def backfill_tre_motori(pron, df_tutte, comp_df, progress=None, forza=False, lim
                                      data_partita=r.get("data"), escludi_id=pid,
                                      competizione=comp, odds=odds, indice=indice)
             if racc and (racc.get("_storico_insufficiente") or racc.get("_inaffidabile")):
-                continue   # meno di 15 partite: niente pronostico per questa
+                continue   # finestra dati insufficiente: niente pronostico per questa
             if not racc:
                 # il nuovo motore non ha prodotto nulla (una squadra senza storico nel DB):
                 # invece di SALTARE (lasciando merc_motore NULL), calcola col vecchio motore
@@ -6960,7 +6993,7 @@ def _record_pronostico_da_fixture(row, df, comp_df, calibratori, livelli, config
     racc = analisi_ragionata(df_uso, home, away, data_partita=data_partita, odds=odds,
                              variazioni=variazioni, escludi_id=row.get("id"),
                              competizione=comp_target, indice=indice)
-    # meno di 15 partite di storico: non genero il pronostico
+    # finestra dati insufficiente (ultime 12 con ≥6 casa/≥6 trasferta): non genero il pronostico
     if racc and (racc.get("_storico_insufficiente") or racc.get("_inaffidabile")):
         return None
     # fallback: se col df ridotto/indice non esce nulla, riprova col df COMPLETO senza indice
@@ -7937,7 +7970,8 @@ def pagina_console_partite(user):
              or int(r["Storico"].split("+")[1]) < 8]
     if poche:
         st.caption(f"⚠️ {len(poche)} partite hanno una squadra con meno di 8 partite di storico. "
-                   "Per quelle conviene inserire le ultime 15 da 'Ultimi risultati e quote'.")
+                   "Per quelle conviene inserire le ultime da 'Ultimi risultati e quote' (il motore "
+                   "usa le ultime 12, con ≥6 in casa/≥6 in trasferta).")
 
 
 def pagina_inserimento_storico(user):
@@ -8146,8 +8180,9 @@ def pagina_inserimento_storico(user):
         st.success(f"«{soggetto}» ({nazione_sogg}) è già validata "
                    f"({_gia_val.get('n_partite')} partite al momento della validazione).")
     st.caption(f"A DB il soggetto ha attualmente **{_n_db_sogg}** partite. La validazione è "
-               "un'etichetta di fiducia: non blocca i motori (serve comunque il minimo di 15 "
-               "partite su entrambe le squadre).")
+               "un'etichetta di fiducia: non blocca i motori (serve comunque la finestra delle "
+               "ultime 12 partite, con ≥6 in casa per la squadra di casa e ≥6 in trasferta per "
+               "l'ospite).")
     if st.button(f"✅ Valida storico di «{soggetto}» ({nazione_sogg or 'n.d.'})"):
         salva_storico_validato(soggetto, nazione_sogg, _n_db_sogg, user["username"])
         st.success("Storico validato.")
@@ -8158,7 +8193,8 @@ def pagina_inserimento_storico(user):
     st.markdown("### Avversari incontrati")
     st.caption("Conteggio storico a DB e stato di validazione di ogni avversario. Serve solo a "
                "decidere quali altre squadre valga la pena popolare (gli snapshot ML si creano "
-               "solo quando ENTRAMBE hanno ≥15 partite).")
+               "solo quando ENTRAMBE hanno le ultime 12 partite, con ≥6 in casa per la squadra "
+               "di casa e ≥6 in trasferta per l'ospite).")
     avv = {}
     for p in partite:
         for lato in ("casa", "trasferta"):
@@ -8176,7 +8212,7 @@ def pagina_inserimento_storico(user):
             n = int(((_kc_all == kk) | (_kt_all == kk)).sum())
         val = any(vk[0] == kk for vk in _valid.keys())
         riep.append({"Avversario": nm, "Storico a DB": n,
-                     "Pronosticabile (≥15)": "sì" if n >= 15 else "no",
+                     "Pronosticabile (≥12)": "sì" if n >= FINESTRA_PARTITE else "no",
                      "Validata": "✅" if val else "—"})
     if riep:
         st.dataframe(pd.DataFrame(riep), use_container_width=True, hide_index=True)
