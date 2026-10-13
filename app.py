@@ -4598,6 +4598,35 @@ def pagina_estrattore_pianificazione(user):
                                     key=f"amb_scelta_{_key(_sq)}")
                 _scelte_amb[_sq] = _sq if _sel.endswith("(lascia così)") else _sel
 
+    # === SCELTA omonime per DIVISIONE senza regola per questa competizione ===
+    # Come per le nazioni: se una squadra ha omonime per divisione (già taggate) ma la
+    # competizione attuale (es. Champions) non ha una regola, chiedi quale squadra è.
+    _mapdiv_p = carica_omonime_divisione()
+    _scelte_div = {}
+    if _mapdiv_p:
+        def _tag_noti(base):
+            kb = _key(_norm_squadra(base))
+            return sorted({v for (kn, kc), v in _mapdiv_p.items() if kn == kb})
+        _div_ambigue = []
+        for idx, rrow in edit.iterrows():
+            if not rrow.get("Crea") or not rrow.get("Casa") or not rrow.get("Trasferta"):
+                continue
+            _comp = meta[idx]["competizione"]
+            for _sq in (rrow["Casa"], rrow["Trasferta"]):
+                noti = _tag_noti(_sq)
+                # ambigua se ha tag noti MA la competizione non ha una regola (resta semplice)
+                if noti and applica_tag_divisione(_sq, _comp, _mapdiv_p) == _sq:
+                    if _sq not in [x[0] for x in _div_ambigue]:
+                        _div_ambigue.append((_sq, noti))
+        if _div_ambigue:
+            st.markdown("**🔀 Squadre con omonima per divisione** — scegli quale squadra è in "
+                        "questa competizione (la scelta viene ricordata per le prossime):")
+            for _sq, noti in _div_ambigue:
+                _opz = noti + [f"{_sq} (lascia semplice)"]
+                _sel = st.selectbox(f"«{_sq}» in questa competizione è:", _opz,
+                                    key=f"div_scelta_{_key(_sq)}")
+                _scelte_div[_sq] = _sq if _sel.endswith("(lascia semplice)") else _sel
+
     if st.button("💾 Crea partite da compilare", type="primary"):
         if nuove:
             upsert_competizioni([
@@ -4618,9 +4647,18 @@ def pagina_estrattore_pianificazione(user):
                 casa_r = _scelte_amb.get(rrow["Casa"], rrow["Casa"])
             if _ok_t == "scegli":
                 trasf_r = _scelte_amb.get(rrow["Trasferta"], rrow["Trasferta"])
-            # omonime per divisione: tagga in base alla competizione
+            # omonime per divisione: tagga in base alla competizione (regola esistente)
             casa_r = applica_tag_divisione(casa_r, _comp, _mapdiv)
             trasf_r = applica_tag_divisione(trasf_r, _comp, _mapdiv)
+            # ...se non c'era regola, usa la SCELTA manuale fatta sopra e SALVA la regola
+            if rrow["Casa"] in _scelte_div and _key(casa_r) == _key(rrow["Casa"]):
+                casa_r = _scelte_div[rrow["Casa"]]
+                if casa_r != rrow["Casa"]:
+                    salva_omonima_divisione(rrow["Casa"], _comp, casa_r)
+            if rrow["Trasferta"] in _scelte_div and _key(trasf_r) == _key(rrow["Trasferta"]):
+                trasf_r = _scelte_div[rrow["Trasferta"]]
+                if trasf_r != rrow["Trasferta"]:
+                    salva_omonima_divisione(rrow["Trasferta"], _comp, trasf_r)
             records.append({
                 "data": str(data_batch),
                 "ora": rrow["Ora"] or None,
