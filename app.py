@@ -7966,7 +7966,7 @@ def pagina_console_partite(user):
                 st.rerun()
 
     # avviso sulle squadre con poco storico
-    poche = [r for r in righe if int(r["Storico"].split("+")[0]) < 8
+    poche = [r for r in (righe_ok + righe_ko) if int(r["Storico"].split("+")[0]) < 8
              or int(r["Storico"].split("+")[1]) < 8]
     if poche:
         st.caption(f"⚠️ {len(poche)} partite hanno una squadra con meno di 8 partite di storico. "
