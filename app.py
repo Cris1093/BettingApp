@@ -944,6 +944,30 @@ def applica_tag_divisione(nome, competizione, mappa=None):
     return mappa.get((_key(_norm_squadra(nome)), _key(_txt(competizione))), nome)
 
 
+def _proponi_tag_divisione(base, competizione, comp_df=None):
+    """Propone il nome taggato per 'base' nella 'competizione' indicata, con la STESSA logica
+    della Configurazione: per un CAMPIONATO il tag è il nome del campionato (es.
+    'LASK (Regionalliga North)'); per una competizione da NAZIONALE è 'Nazionale'; per una
+    COPPA non si può proporre in automatico (ritorna None, l'assegnazione resta manuale).
+    'competizione' è l'etichetta come salvata nelle partite, es. 'Regionalliga North | AUSTRIA'."""
+    base_pulito = _norm_squadra(base)
+    lbl = _txt(competizione)
+    if not lbl:
+        return None
+    # nome_lungo = parte prima di ' | NAZIONE'
+    nome_lungo = lbl.rsplit(" | ", 1)[0].strip() if " | " in lbl else lbl
+    cat = categoria_di(competizione, comp_df) if comp_df is not None else ""
+    if _e_comp_nazionali(nome_lungo):
+        suf = "Nazionale"
+    elif _e_lega_comp(cat, nome_lungo):
+        suf = nome_lungo
+    else:
+        return None   # coppa: niente proposta automatica
+    if not suf:
+        return None
+    return f"{base_pulito} ({suf})"
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def carica_competizioni():
     cli = get_client()
@@ -1812,6 +1836,18 @@ def parse_risultati(testo, raccogli_posticipate=False):
                   "annullata", "rinviato", "sospeso", "abb.", "abbandonata", "a tav.",
                   "a tavolino", "tav.", "walkover", "w.o.", "wo"}
 
+    # RUMORE: token che NON sono mai nome o nazione di una competizione. Comprende i broadcaster
+    # e gli stati 'non ancora giocata' (SRF/Live/Da finire), i marcatori di rinvio/sospensione e
+    # gli orari (HH:MM). Se uno di questi finisce nello slot competizione o nazione, nasce una
+    # competizione fantasma tipo 'Klingenbach | SRF' o '18:00 | BFL': quindi non vanno MAI
+    # accoppiati come intestazione.
+    _rumore = set(_post_veri) | {"srf", "live", "da finire", "n.d.", "nd", "-"}
+
+    def _e_rumore(x):
+        s = _txt(x).strip()
+        return (s.lower() in _rumore
+                or re.fullmatch(r"\d{1,2}:\d{2}", s) is not None)
+
     risultati = []
     posticipate = []
     comp_corr, naz_corr = None, None
@@ -1963,10 +1999,22 @@ def parse_risultati(testo, raccogli_posticipate=False):
             i += 1
             continue
 
-        # intestazione competizione: nome + nazione
+        # RUMORE nello slot nome competizione (SRF/Live/orario/marcatore residuo): saltalo da
+        # solo, non è un'intestazione. Evita competizioni fantasma tipo '18:00 | BFL'.
+        if _e_rumore(righe[i]):
+            i += 1
+            continue
+
+        # intestazione competizione: nome + nazione. Se la riga-nazione è rumore (es. 'SRF' o un
+        # orario), NON la accoppiamo come nazione: la competizione prende solo il nome e il rumore
+        # verrà saltato al giro dopo. Così non nasce 'Klingenbach | SRF'.
         comp_corr = righe[i]
-        naz_corr = righe[i + 1] if i + 1 < n else None
-        i += 2
+        if i + 1 < n and not _e_rumore(righe[i + 1]):
+            naz_corr = righe[i + 1]
+            i += 2
+        else:
+            naz_corr = None
+            i += 1
     if raccogli_posticipate:
         return risultati, posticipate
     return risultati
@@ -4607,7 +4655,8 @@ def pagina_estrattore_pianificazione(user):
         def _tag_noti(base):
             kb = _key(_norm_squadra(base))
             return sorted({v for (kn, kc), v in _mapdiv_p.items() if kn == kb})
-        _div_ambigue = []
+        _div_opts = {}       # _sq -> lista opzioni (tag noti + proposta per la competizione)
+        _div_default = {}    # _sq -> opzione proposta per la competizione corrente (pre-selezione)
         for idx, rrow in edit.iterrows():
             if not rrow.get("Crea") or not rrow.get("Casa") or not rrow.get("Trasferta"):
                 continue
@@ -4616,16 +4665,34 @@ def pagina_estrattore_pianificazione(user):
                 noti = _tag_noti(_sq)
                 # ambigua se ha tag noti MA la competizione non ha una regola (resta semplice)
                 if noti and applica_tag_divisione(_sq, _comp, _mapdiv_p) == _sq:
-                    if _sq not in [x[0] for x in _div_ambigue]:
-                        _div_ambigue.append((_sq, noti))
-        if _div_ambigue:
+                    # proponi ANCHE il tag per la competizione di QUESTA partita (es. se LASK
+                    # gioca in Regionalliga North, offri 'LASK (Regionalliga North)' oltre ai tag
+                    # già salvati come 'LASK (Bundesliga)'): così si può separare la squadra nuova.
+                    _prop = _proponi_tag_divisione(_sq, _comp, comp_df)
+                    cur = _div_opts.setdefault(_sq, list(noti))
+                    if _prop and _prop not in cur:
+                        cur.append(_prop)
+                    if _prop and _sq not in _div_default:
+                        _div_default[_sq] = _prop
+        if _div_opts:
             st.markdown("**🔀 Squadre con omonima per divisione** — scegli quale squadra è in "
-                        "questa competizione (la scelta viene ricordata per le prossime):")
-            for _sq, noti in _div_ambigue:
-                _opz = noti + [f"{_sq} (lascia semplice)"]
-                _sel = st.selectbox(f"«{_sq}» in questa competizione è:", _opz,
+                        "questa competizione (la scelta viene ricordata per le prossime). Se la "
+                        "squadra giusta non è in elenco (es. una coppa), scrivi tu il tag qui sotto:")
+            for _sq, opts in _div_opts.items():
+                _opz = opts + [f"{_sq} (lascia semplice)", f"{_sq} … (scrivi un tag)"]
+                _def = _div_default.get(_sq)
+                _idx0 = _opz.index(_def) if _def in _opz else 0
+                _sel = st.selectbox(f"«{_sq}» in questa competizione è:", _opz, index=_idx0,
                                     key=f"div_scelta_{_key(_sq)}")
-                _scelte_div[_sq] = _sq if _sel.endswith("(lascia semplice)") else _sel
+                if _sel.endswith("(lascia semplice)"):
+                    _scelte_div[_sq] = _sq
+                elif _sel.endswith("(scrivi un tag)"):
+                    _manual = st.text_input(f"Tag per «{_sq}» (diventerà «{_norm_squadra(_sq)} (tag)»)",
+                                            key=f"div_manual_{_key(_sq)}")
+                    _scelte_div[_sq] = (f"{_norm_squadra(_sq)} ({_manual.strip()})"
+                                        if _manual.strip() else _sq)
+                else:
+                    _scelte_div[_sq] = _sel
 
     if st.button("💾 Crea partite da compilare", type="primary"):
         if nuove:
