@@ -7862,9 +7862,9 @@ def pagina_console_partite(user):
     concl = df[df["gol_casa"].notna() & df["gol_trasferta"].notna()]
     conteggio = {}
     if not concl.empty:
-        for s in pd.concat([concl["squadra_casa"], concl["squadra_trasferta"]]):
-            k = _key(s)
-            conteggio[k] = conteggio.get(k, 0) + 1
+        # VETTORIALE (value_counts in C): era un ciclo Python su ~18k nomi a ogni apertura.
+        _tutte = pd.concat([concl["squadra_casa"], concl["squadra_trasferta"]], ignore_index=True)
+        conteggio = _tutte.map(_key).value_counts().to_dict()
 
     def _storico(sq):
         return conteggio.get(_key(sq), 0)
@@ -7932,16 +7932,20 @@ def pagina_console_partite(user):
                    "Lancia nel SQL editor di Supabase:\n\n"
                    "```sql\nalter table competizioni add column if not exists "
                    "validato boolean default false;\n```")
+    # INDICE competizioni costruito UNA volta: {chiave -> [righe competizione]}. Prima la
+    # validazione faceva comp_df.iterrows() PER OGNI competizione del giorno (N×M), ed era il
+    # vero collo di bottiglia della Console (~1,5s+ a render, in crescita col DB). Con l'indice
+    # ogni competizione del giorno è un semplice lookup. Le righe sono dict (to_dict records).
+    _idx_comp = {}
+    if not comp_df.empty:
+        for _c in comp_df.to_dict("records"):
+            for _kk in _chiavi_competizione(_c):
+                _idx_comp.setdefault(_kk, []).append(_c)
     da_validare = []
     for code in comps_giorno:
-        k = _key(code)
         # TUTTE le righe competizione che combaciano con questo codice (possono essercene più
         # di una se ci sono duplicati storici). È validato se ANCHE SOLO UNA è validata.
-        matching = []
-        if not comp_df.empty:
-            for _, c in comp_df.iterrows():
-                if k in _chiavi_competizione(c):
-                    matching.append(c)
+        matching = _idx_comp.get(_key(code), [])
         riga_comp = matching[0] if matching else None
         gia_validato = bool(_val_col and any(bool(c.get("validato")) for c in matching))
         if not gia_validato:
