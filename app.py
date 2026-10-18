@@ -1060,7 +1060,8 @@ def upsert_competizioni(records):
         rec["id"] = _id or str(uuid.uuid4())
     cli.table("competizioni").upsert(records).execute()
     # invalidazione MIRATA: solo le cache legate alle competizioni, NON le ~7646 partite
-    for _f in (carica_competizioni, _mappa_label_competizioni, _mappa_comp_per_id):
+    for _f in (carica_competizioni, _mappa_label_competizioni, _mappa_comp_per_id,
+               _mappa_categoria_competizioni):
         try:
             _f.clear()
         except Exception:
@@ -1324,16 +1325,28 @@ def completa_risultati_pronostici(diagnostica=False):
     part = carica_partite()
     if part.empty:
         return diag if diagnostica else 0
-    part_con_ris = part[part["gol_casa"].notna()]
+    part_con_ris = part[part["gol_casa"].notna()].copy()
+    if part_con_ris.empty:
+        return diag if diagnostica else 0
     from datetime import timedelta as _td
+    from collections import defaultdict as _dd_pr
+    # INDICE costruito UNA volta: (casa_low, trasf_low) -> [(data, gol_casa, gol_trasferta)].
+    # Prima si rinormalizzava TUTTO il DB (astype/str/lower su migliaia di righe) per OGNI
+    # pronostico in attesa: O(pronostici × partite), il collo di bottiglia del salvataggio.
+    part_con_ris["_h"] = part_con_ris["squadra_casa"].astype(str).str.strip().str.lower()
+    part_con_ris["_a"] = part_con_ris["squadra_trasferta"].astype(str).str.strip().str.lower()
+    part_con_ris["_dd"] = pd.to_datetime(part_con_ris["data"].astype(str).str[:10], errors="coerce")
+    idx_pr = _dd_pr(list)
+    for _h, _a, _dd, _gc, _gt in zip(part_con_ris["_h"], part_con_ris["_a"],
+                                     part_con_ris["_dd"], part_con_ris["gol_casa"],
+                                     part_con_ris["gol_trasferta"]):
+        idx_pr[(_h, _a)].append((_dd, _gc, _gt))
     agg = 0
     for pr in pron:
         h = str(pr.get("squadra_casa") or "").strip()
         a = str(pr.get("squadra_trasferta") or "").strip()
-        m = part_con_ris[
-            (part_con_ris["squadra_casa"].astype(str).str.strip().str.lower() == h.lower()) &
-            (part_con_ris["squadra_trasferta"].astype(str).str.strip().str.lower() == a.lower())]
-        if m.empty:
+        cand = idx_pr.get((h.lower(), a.lower()))
+        if not cand:
             diag["no_match_squadre"] += 1
             if len(diag["esempi_falliti"]) < 8:
                 diag["esempi_falliti"].append(f"{h} vs {a} (nessuna partita con risultato)")
@@ -1345,22 +1358,24 @@ def completa_risultati_pronostici(diagnostica=False):
         if pron_data is None:
             diag["no_match_squadre"] += 1
             continue
-        mm_date = m.copy()
-        mm_date["_dd"] = pd.to_datetime(mm_date["data"].astype(str).str[:10], errors="coerce")
-        vicine = mm_date[(mm_date["_dd"] - pron_data).abs() <= _td(days=1)]
-        if vicine.empty:
+        # tra i candidati, tieni quelli entro ±1 giorno e prendi il più vicino
+        best = None
+        for _dd, _gc, _gt in cand:
+            if pd.isna(_dd):
+                continue
+            gap = abs(_dd - pron_data)
+            if gap <= _td(days=1) and (best is None or gap < best[0]):
+                best = (gap, _gc, _gt)
+        if best is None:
             # squadre trovate ma nessuna partita nella data giusta -> NON agganciare
             diag["no_match_squadre"] += 1
             if len(diag["esempi_falliti"]) < 8:
                 diag["esempi_falliti"].append(
                     f"{h} vs {a} (risultato non ancora disponibile per il {str(pr.get('data'))[:10]})")
             continue
-        # tra quelle nella data giusta, prendi la più vicina alla data del pronostico
-        vicine = vicine.assign(_gap=(vicine["_dd"] - pron_data).abs())
-        r = vicine.sort_values("_gap").iloc[0]
         try:
             cli.table("pronostici").update({
-                "gol_casa": int(r["gol_casa"]), "gol_trasferta": int(r["gol_trasferta"]),
+                "gol_casa": int(best[1]), "gol_trasferta": int(best[2]),
             }).eq("id", pr["id"]).execute()
             agg += 1
         except Exception:
@@ -1537,10 +1552,21 @@ def _chiavi_competizione(c):
 
 def categoria_di(codice_o_label, comp_df):
     """Data una competizione (codice breve, nome lungo o 'nome | nazione') restituisce
-    la categoria assegnata, se presente e diversa da 'Non assegnata'."""
-    if comp_df is None or comp_df.empty or not codice_o_label:
+    la categoria assegnata, se presente e diversa da 'Non assegnata'.
+    Usa una mappa in CACHE (veloce): prima faceva comp_df.iterrows() per OGNI chiamata, ed
+    era un collo di bottiglia nell'Estrattore risultati (una scansione per competizione, a
+    ogni rerun). La cache si invalida con le altre mappe competizioni."""
+    if not codice_o_label:
         return None
     k = _key(codice_o_label)
+    try:
+        mp = _mappa_categoria_competizioni()
+        return mp.get(k)
+    except Exception:
+        pass
+    # fallback (cache non disponibile): comportamento originale
+    if comp_df is None or comp_df.empty:
+        return None
     for _, c in comp_df.iterrows():
         cat = c.get("categoria")
         if not cat or cat == "Non assegnata":
@@ -1744,6 +1770,23 @@ def _mappa_label_competizioni():
             continue
         for k in _chiavi_competizione(c):
             m[k] = lab
+    return m
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _mappa_categoria_competizioni():
+    """Mappa {chiave -> categoria} costruita UNA volta (non per ogni chiamata a categoria_di).
+    Salta le competizioni senza categoria o con 'Non assegnata'."""
+    comp_df = carica_competizioni()
+    if comp_df is None or comp_df.empty:
+        return {}
+    m = {}
+    for c in comp_df.to_dict("records"):
+        cat = c.get("categoria")
+        if not cat or cat == "Non assegnata":
+            continue
+        for k in _chiavi_competizione(c):
+            m.setdefault(k, cat)
     return m
 
 
