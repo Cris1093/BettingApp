@@ -679,22 +679,52 @@ def salva_partite(records, preserva_competizione=False):
     _invalida_partite()
 
 
+def _esegui_parallelo(thunks, max_workers=12):
+    """Esegue una lista di callable (0 argomenti) in parallelo con un pool di thread.
+    Ogni chiamata a Supabase è un round-trip di rete (~190ms): in serie 200 update = ~38s,
+    in parallelo scendono a pochi secondi. Il client httpx sottostante è thread-safe per
+    richieste indipendenti. Ritorna la lista delle eccezioni incontrate (vuota se tutto ok)."""
+    import concurrent.futures as _cf
+    errori = []
+    if not thunks:
+        return errori
+
+    def _wrap(fn):
+        try:
+            fn()
+            return None
+        except Exception as e:   # noqa: BLE001 - raccogliamo per rilanciare a valle
+            return e
+    with _cf.ThreadPoolExecutor(max_workers=min(max_workers, len(thunks))) as ex:
+        for res in ex.map(_wrap, thunks):
+            if res is not None:
+                errori.append(res)
+    return errori
+
+
 def aggiorna_partite(records):
     """Aggiorna partite ESISTENTI per id (UPDATE reale, non upsert: tocca solo le
-    colonne indicate, senza rischiare inserimenti di righe vuote)."""
+    colonne indicate, senza rischiare inserimenti di righe vuote). Gli UPDATE vengono
+    eseguiti in PARALLELO: con molti risultati agganciati, in serie erano ~190ms l'uno
+    (200 update ≈ 38s), il collo di bottiglia del salvataggio."""
     cli = get_client()
     if not cli:
         raise RuntimeError("Supabase non configurato.")
+    thunks = []
     for rec in records:
         rid = rec.get("id")
         if not rid:
             continue
         payload = {k: v for k, v in rec.items() if k != "id"}
         if payload:
-            cli.table("partite").update(payload).eq("id", rid).execute()
+            thunks.append(lambda rid=rid, payload=payload:
+                          cli.table("partite").update(payload).eq("id", rid).execute())
+    errori = _esegui_parallelo(thunks)
     # invalidazione MIRATA (solo partite): prima svuotava TUTTA la cache, forzando il
     # ricaricamento delle ~7646 righe + competizioni/pronostici a ogni salvataggio risultati.
     _invalida_partite()
+    if errori:
+        raise errori[0]
 
 
 def elimina_partite(ids):
@@ -1341,7 +1371,7 @@ def completa_risultati_pronostici(diagnostica=False):
                                      part_con_ris["_dd"], part_con_ris["gol_casa"],
                                      part_con_ris["gol_trasferta"]):
         idx_pr[(_h, _a)].append((_dd, _gc, _gt))
-    agg = 0
+    da_aggiornare = []   # (pr_id, gol_casa, gol_trasferta) da scrivere
     for pr in pron:
         h = str(pr.get("squadra_casa") or "").strip()
         a = str(pr.get("squadra_trasferta") or "").strip()
@@ -1373,13 +1403,16 @@ def completa_risultati_pronostici(diagnostica=False):
                 diag["esempi_falliti"].append(
                     f"{h} vs {a} (risultato non ancora disponibile per il {str(pr.get('data'))[:10]})")
             continue
-        try:
-            cli.table("pronostici").update({
-                "gol_casa": int(best[1]), "gol_trasferta": int(best[2]),
-            }).eq("id", pr["id"]).execute()
-            agg += 1
-        except Exception:
-            diag["no_risultato"] += 1
+        da_aggiornare.append((pr["id"], int(best[1]), int(best[2])))
+    # scritture in PARALLELO (ogni update è un round-trip ~190ms)
+    _thunks = [
+        (lambda pid=pid, gc=gc, gt=gt:
+         cli.table("pronostici").update({"gol_casa": gc, "gol_trasferta": gt}).eq("id", pid).execute())
+        for (pid, gc, gt) in da_aggiornare
+    ]
+    _err = _esegui_parallelo(_thunks)
+    agg = len(da_aggiornare) - len(_err)
+    diag["no_risultato"] += len(_err)
     diag["agg"] = agg
     return diag if diagnostica else agg
 
