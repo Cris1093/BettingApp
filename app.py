@@ -1917,7 +1917,14 @@ def parse_risultati(testo, raccogli_posticipate=False):
     # gli orari (HH:MM). Se uno di questi finisce nello slot competizione o nazione, nasce una
     # competizione fantasma tipo 'Klingenbach | SRF' o '18:00 | BFL': quindi non vanno MAI
     # accoppiati come intestazione.
-    _rumore = set(_post_veri) | {"srf", "live", "da finire", "n.d.", "nd", "-"}
+    # qualificatori di esito (dopo supplementari/rigori): sono attributi del risultato, non
+    # competizioni. Se un blocco è malformato (es. il qualificatore finisce in mezzo ai numeri),
+    # senza questa lista 'Dopo Suppl.' + il numero seguente diventavano una competizione fantasma
+    # tipo 'Dopo Suppl. | 3'.
+    _qualificatori = {"dopo suppl.", "dopo suppl", "dopo supplementari", "dopo rigori",
+                      "dopo t.s.", "dopo c.r.", "d.c.r.", "dcr", "d.t.s.", "dts"}
+    _rumore = (set(_post_veri) | _qualificatori
+               | {"srf", "live", "da finire", "n.d.", "nd", "-"})
 
     def _e_rumore(x):
         s = _txt(x).strip()
