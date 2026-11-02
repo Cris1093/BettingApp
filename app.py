@@ -5199,9 +5199,10 @@ def _snapshot_partita_corrente(df, home, away, data_partita, competizione):
         return None
 
 
-def _snapshot_prematch_una(df, comp_df, riga):
+def _snapshot_prematch_una(df, comp_df, riga, indice=None):
     """Costruisce lo snapshot pre-match (feature + target) per UNA partita conclusa,
-    usando solo i dati precedenti (walk-forward). Ritorna (features, target, nh, na) o None."""
+    usando solo i dati precedenti (walk-forward). Ritorna (features, target, nh, na) o None.
+    'indice' (costruisci_indice_squadre) velocizza molto il batch su tutto il DB."""
     home = riga["squadra_casa"]
     away = riga["squadra_trasferta"]
     data_p = riga["data"]
@@ -5219,8 +5220,10 @@ def _snapshot_prematch_una(df, comp_df, riga):
     t_liv = _livello_di(riga.get("competizione"), comp_df)
     t_cat = categoria_di(riga.get("competizione"), comp_df)
     t_key = _key(riga.get("competizione")) if riga.get("competizione") else None
-    ph = _partite_squadra_evidenze(df, home, data_p, pid, comp_df, t_liv, t_cat, t_key)
-    pa = _partite_squadra_evidenze(df, away, data_p, pid, comp_df, t_liv, t_cat, t_key)
+    ph = _partite_squadra_evidenze(df, home, data_p, pid, comp_df, t_liv, t_cat, t_key,
+                                   indice=indice)
+    pa = _partite_squadra_evidenze(df, away, data_p, pid, comp_df, t_liv, t_cat, t_key,
+                                   indice=indice)
     # soglia allineata al motore: uno snapshot ML si crea SOLO se la finestra è valida (ultime 12
     # partite per squadra, con >= 6 in casa per la squadra di casa e >= 6 in trasferta per l'ospite).
     # Evita di inquinare il dataset con avversari dallo storico incompleto (es. una squadra che
@@ -5274,11 +5277,15 @@ def genera_snapshot_prematch(df, comp_df, progress=None):
         gia = {str(x["partita_id"]) for x in (r.data or [])}
     except Exception as e:
         return 0, 0, f"lettura tabella fallita: {e}"
-    _mask = df["gol_casa"].notna() & df["gol_trasferta"].notna()
-    if "is_target" in df.columns:
-        concl = df[_mask & (df["is_target"] == True)]
-    else:
-        concl = df[_mask] if "gol_casa" in df.columns else df.iloc[0:0]
+    # TUTTE le partite concluse (non più solo le is_target): lo snapshot si crea per ogni
+    # partita che rispetta la finestra 12 + 6 casa/6 trasferta (il gate è dentro
+    # _snapshot_prematch_una, che esclude anche le inaffidabili). Così il dataset ML cresce
+    # da solo mano a mano che arrivano nuove partite.
+    _mask = df["gol_casa"].notna() & df["gol_trasferta"].notna() if "gol_casa" in df.columns else None
+    concl = df[_mask] if _mask is not None else df.iloc[0:0]
+    # indice pre-costruito UNA volta: evita di riscansionare l'intero DB per ogni squadra
+    # (su ~11k partite × 2 squadre sarebbe lentissimo senza).
+    indice = costruisci_indice_squadre(df)
     creati = saltati = 0
     primo_errore = None
     righe = list(concl.iterrows())
@@ -5290,11 +5297,11 @@ def genera_snapshot_prematch(df, comp_df, progress=None):
             saltati += 1
             continue
         try:
-            res = _snapshot_prematch_una(df, comp_df, riga)
+            res = _snapshot_prematch_una(df, comp_df, riga, indice=indice)
             if res is None:
+                # NORMALE: la partita non rispetta ancora la finestra (12 + 6 casa/6 trasferta)
+                # o è di un campionato inaffidabile. Non è un errore: si conta solo come saltata.
                 saltati += 1
-                if primo_errore is None:
-                    primo_errore = "storico insufficiente per alcune partite"
                 continue
             feat, tgt, nh, na = res
             ok, err = salva_snapshot_prematch(
