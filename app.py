@@ -1909,8 +1909,8 @@ def parse_risultati(testo, raccogli_posticipate=False):
     # marcatori di partita NON giocata da trattare come POSTICIPATA (non SRF/orario/live, che
     # indicano solo 'non ancora iniziata' e non vanno cancellate)
     _post_veri = {"post.", "rinv.", "rinviata", "posticipata", "sospesa", "sosp.", "canc.",
-                  "annullata", "rinviato", "sospeso", "abb.", "abbandonata", "a tav.",
-                  "a tavolino", "tav.", "walkover", "w.o.", "wo"}
+                  "annullata", "rinviato", "sospeso", "abb.", "abband.", "abbandonata",
+                  "abbandonato", "a tav.", "a tavolino", "tav.", "walkover", "w.o.", "wo"}
 
     # RUMORE: token che NON sono mai nome o nazione di una competizione. Comprende i broadcaster
     # e gli stati 'non ancora giocata' (SRF/Live/Da finire), i marcatori di rinvio/sospensione e
@@ -1977,8 +1977,8 @@ def parse_risultati(testo, raccogli_posticipate=False):
             i = i + 4
             _marcatori = {"-", "post.", "rinv.", "rinviata", "posticipata", "sospesa",
                           "canc.", "annullata", "n.d.", "nd", "a tav.", "a tavolino",
-                          "tav.", "rinviato", "sospeso", "abb.", "abbandonata", "walkover",
-                          "w.o.", "wo", "srf", "live", "da finire"}
+                          "tav.", "rinviato", "sospeso", "abb.", "abband.", "abbandonata",
+                          "abbandonato", "walkover", "w.o.", "wo", "srf", "live", "da finire"}
 
             def _e_orario(x):
                 return re.fullmatch(r"\d{1,2}:\d{2}", x.strip()) is not None
@@ -2125,8 +2125,8 @@ def parse_pianificazione(testo):
     # come competizione della partita successiva).
     _postmark = {"post.", "rinv.", "rinv", "rinviata", "posticipata", "sospesa", "sosp.",
                  "canc.", "annullata", "n.d.", "nd", "a tav.", "a tavolino", "tav.",
-                 "rinviato", "sospeso", "abb.", "abbandonata", "walkover", "w.o.", "wo",
-                 "da finire"}
+                 "rinviato", "sospeso", "abb.", "abband.", "abbandonata", "abbandonato",
+                 "walkover", "w.o.", "wo", "da finire"}
 
     def is_marker(x):
         return x.strip().lower() in _postmark
