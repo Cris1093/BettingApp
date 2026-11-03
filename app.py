@@ -1982,7 +1982,13 @@ def parse_risultati(testo, raccogli_posticipate=False):
 
             def _e_orario(x):
                 return re.fullmatch(r"\d{1,2}:\d{2}", x.strip()) is not None
-            while i < n and (righe[i].strip().lower() in _marcatori or _e_orario(righe[i])):
+            # consuma marcatori, orari E numeri orfani residui: un blocco malformato come
+            # "T T U U 2 Abband. 2 2" lascia numeri sparsi ('2 2') che, se non assorbiti,
+            # si accoppierebbero con le squadre doppie della partita successiva ('Oviedo
+            # Oviedo') facendola sparire. A questo punto del blocco una partita valida inizia
+            # sempre con un NOME (stringa), mai con un numero: quindi consumare i numeri è sicuro.
+            while i < n and (righe[i].strip().lower() in _marcatori
+                             or _e_orario(righe[i]) or is_int(righe[i])):
                 i += 1
             continue
         # blocco MALFORMATO: casa, casa, trasf (NON ripetuta), gol, gol
@@ -2085,6 +2091,14 @@ def parse_risultati(testo, raccogli_posticipate=False):
         # RUMORE nello slot nome competizione (SRF/Live/orario/marcatore residuo): saltalo da
         # solo, non è un'intestazione. Evita competizioni fantasma tipo '18:00 | BFL'.
         if _e_rumore(righe[i]):
+            i += 1
+            continue
+
+        # DUE RIGHE IDENTICHE non sono mai 'nome competizione + nazione' (un'intestazione ha
+        # sempre nome ≠ NAZIONE): è una squadra doppia finita qui per un disallineamento da
+        # blocco malformato. La saltiamo di una riga invece di creare una competizione fantasma
+        # tipo 'Las Palmas | Las Palmas'.
+        if i + 1 < n and righe[i] == righe[i + 1]:
             i += 1
             continue
 
