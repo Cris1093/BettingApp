@@ -3709,11 +3709,28 @@ def pagina_database(user):
                                    "nazione: niente da assegnare.")
                     else:
                         _target = [f"{_scelta_sq} ({n})" for n in nazioni]  # nomi completi
+                        # mappa competizione(chiave) -> nazione, UNA volta, per PRECOMPILARE
+                        # l'assegnazione: una partita in un campionato/coppa di un paese noto va
+                        # ovviamente alla squadra di quel paese (es. COSTARICA -> San Carlos
+                        # (COSTARICA)). Restano da scegliere a mano solo i casi senza paese chiaro
+                        # (es. coppe internazionali con 'nazione' = continente).
+                        _naz_per_comp = {}
+                        for _, c in comp_df_om.iterrows():
+                            _na = _txt(c.get("nazione"))
+                            for kk in _chiavi_competizione(c):
+                                _naz_per_comp[kk] = _na
+                        _norm2disp = {_key(n): n for n in nazioni}   # nazione normalizzata -> come in _target
                         _rows_c = []
+                        _pre = 0
                         for _, p in _plain.sort_values("data", ascending=False).iterrows():
                             gc, gt = p.get("gol_casa"), p.get("gol_trasferta")
                             ris = (f"{int(gc)}-{int(gt)}"
                                    if (_num_ok(gc) and _num_ok(gt)) else "in attesa")
+                            _naz_comp = _naz_per_comp.get(_key(_txt(p.get("competizione"))))
+                            _assegna = "—"
+                            if _naz_comp and _key(_naz_comp) in _norm2disp:
+                                _assegna = f"{_scelta_sq} ({_norm2disp[_key(_naz_comp)]})"
+                                _pre += 1
                             _rows_c.append({
                                 "id": p.get("id"),
                                 "Data": str(p.get("data"))[:10],
@@ -3722,8 +3739,12 @@ def pagina_database(user):
                                 "Risultato": ris,
                                 "Competizione": _label_da_comp(p.get("competizione"),
                                                                comp_df_om) or "—",
-                                "Assegna a": "—",
+                                "Assegna a": _assegna,
                             })
+                        if _pre:
+                            st.caption(f"✨ {_pre} partite già precompilate in base alla nazione "
+                                       "della competizione: controlla e premi «Applica». Le righe "
+                                       "con «—» (es. coppe internazionali) scegliile a mano.")
                         _vdf_c = pd.DataFrame(_rows_c)
                         _ed_c = st.data_editor(
                             _vdf_c, use_container_width=True, hide_index=True,
