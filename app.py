@@ -1655,7 +1655,7 @@ def _rileva_squadre_omonime():
         na = _txt(c.get("nazione"))
         for kk in _chiavi_competizione(c):
             naz_map[kk] = na
-    naz_per_squadra = {}
+    naz_per_squadra = {}   # sq -> {nazione_normalizzata: nazione_visualizzata}
     for _, p in df.iterrows():
         na = naz_map.get(_key(_txt(p.get("competizione"))))
         if not na or _key(na) in _non_paesi:
@@ -1663,8 +1663,12 @@ def _rileva_squadre_omonime():
         for col in ("squadra_casa", "squadra_trasferta"):
             sq = _txt(p.get(col))
             if sq:
-                naz_per_squadra.setdefault(sq, set()).add(na)
-    return {sq: nz for sq, nz in naz_per_squadra.items() if len(nz) > 1}
+                # dedup per nazione NORMALIZZATA: 'SPAGNA' e 'Spagna' sono lo stesso paese.
+                # Senza questo, una squadra che gioca in due varianti di scrittura della stessa
+                # competizione (es. 'LaLiga | SPAGNA' e 'LALIGA | Spagna') sembrerebbe omonima
+                # (due 'nazioni' diverse) pur essendo un'unica squadra.
+                naz_per_squadra.setdefault(sq, {}).setdefault(_key(na), na)
+    return {sq: set(d.values()) for sq, d in naz_per_squadra.items() if len(d) > 1}
 
 
 def _e_lega_comp(categoria, nome_lungo):
@@ -3626,6 +3630,23 @@ def pagina_database(user):
                 if _scelta_sq:
                     nazioni = sorted(_opzioni[_scelta_sq]["nazioni"])
                     _e_rilevata = _opzioni[_scelta_sq]["rilevata"]
+
+                    # RIMOZIONE registrazione errata: se la squadra è già registrata come ambigua
+                    # ma NON è una vera omonima (es. un club che gioca solo campionato + coppa nello
+                    # stesso paese, finito qui per una nazione scritta in due modi), qui la togli.
+                    _reg_amb = _amb_esist.get(_key(_norm_squadra(_scelta_sq)))
+                    if _reg_amb and _reg_amb.get("id"):
+                        if st.button(f"🗑️ «{_scelta_sq}» NON è omonima: rimuovi dall'elenco",
+                                     key="om_rimuovi_reg"):
+                            elimina_squadra_ambigua(_reg_amb["id"])
+                            try:
+                                carica_squadre_ambigue.clear()
+                            except Exception:
+                                pass
+                            st.success(f"«{_scelta_sq}» rimossa dall'elenco delle omonime. "
+                                       "Se qualche partita era stata rinominata, sistemala dal "
+                                       "Database.")
+                            st.rerun()
 
                     # separazione partite di CAMPIONATO (solo se rilevata come nuova)
                     if _e_rilevata:
